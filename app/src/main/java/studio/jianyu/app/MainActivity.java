@@ -27,12 +27,14 @@ import android.view.Window;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputMethodManager;
+import android.provider.MediaStore;
 import android.widget.*;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.recyclerview.widget.StaggeredGridLayoutManager;
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
@@ -103,10 +105,15 @@ public final class MainActivity extends Activity {
     // 作品库持久化控件
     private TextView librarySubtitleView;
     private TextView librarySelectBtn;
+    private TextView libraryClearRecordsBtn;
+    private LinearLayout librarySegHolder;
+    private int librarySubTab = 0; // 0: 成品画廊, 1: 生成记录
     private LinearLayout libraryFilterRow;
     private RecyclerView libraryRecycler;
+    private RecyclerView recordsRecycler;
     private FrameLayout libraryEmptyBox;
     private GalleryAdapters.LocalLibraryAdapter libraryAdapter;
+    private GalleryAdapters.RecordAdapter recordAdapter;
 
     // 后台生成计时器
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -151,6 +158,7 @@ public final class MainActivity extends Activity {
     private static long genStartMillis = 0L;
     private static String activePrompt = "", activeModel = "", activeRatio = "";
     private static boolean activeHasRef = false;
+    private static String activeRecordId = "";
     private static boolean checkingUpdate = false;
     private static boolean autoCheckedUpdate = false;
     private static UpdateManager.UpdateInfo availableUpdate = null;
@@ -194,6 +202,7 @@ public final class MainActivity extends Activity {
             current = state.getString("current", "");
             activeTab = state.getInt("activeTab", 0);
             libraryFilter = state.getInt("libraryFilter", 0);
+            librarySubTab = state.getInt("librarySubTab", 0);
             inspireSubTab = state.getInt("inspireSubTab", 0);
             galleryMajor = state.getString("galleryMajor", "全部");
             galleryQuery = state.getString("galleryQuery", "");
@@ -254,6 +263,7 @@ public final class MainActivity extends Activity {
         state.putBoolean("nsfw", nsfw);
         state.putInt("activeTab", activeTab);
         state.putInt("libraryFilter", libraryFilter);
+        state.putInt("librarySubTab", librarySubTab);
         state.putInt("inspireSubTab", inspireSubTab);
         state.putString("galleryMajor", galleryMajor);
         state.putString("galleryQuery", galleryQuery);
@@ -567,7 +577,7 @@ public final class MainActivity extends Activity {
 
     private void updateFloatingBarsVisibility() {
         boolean hasOverlay = !overlayStack.isEmpty();
-        boolean showBatch = !hasOverlay && !imeVisible && activeTab == 2 && librarySelectMode;
+        boolean showBatch = !hasOverlay && !imeVisible && activeTab == 2 && librarySelectMode && librarySubTab == 0;
         boolean showNav = !hasOverlay && !imeVisible && !showBatch;
         MotionKit.animateFloatingBar(floatingNav, showNav, 80);
         MotionKit.animateFloatingBar(libraryBatchBar, showBatch, 80);
@@ -1779,6 +1789,15 @@ public final class MainActivity extends Activity {
             else enterLibrarySelectMode(null);
         });
 
+        libraryClearRecordsBtn = UiKit.text(this, "清空记录", 13, UiKit.DANGER, true);
+        libraryClearRecordsBtn.setBackground(UiKit.floatingPillBg(this, 18));
+        UiKit.applySoftShadow(libraryClearRecordsBtn, this, 3, 0x1E182638);
+        libraryClearRecordsBtn.setPadding(dp(15), dp(8), dp(15), dp(8));
+        libraryClearRecordsBtn.setMinimumHeight(dp(38));
+        libraryClearRecordsBtn.setGravity(Gravity.CENTER);
+        libraryClearRecordsBtn.setVisibility(View.GONE);
+        libraryClearRecordsBtn.setOnClickListener(v -> confirmClearRecords());
+
         LinearLayout titleRow = new LinearLayout(this);
         titleRow.setOrientation(LinearLayout.HORIZONTAL);
         titleRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -1791,7 +1810,15 @@ public final class MainActivity extends Activity {
         titleLeft.addView(librarySubtitleView, slp);
         titleRow.addView(titleLeft, new LinearLayout.LayoutParams(0, -2, 1));
         titleRow.addView(librarySelectBtn);
+        titleRow.addView(libraryClearRecordsBtn);
         headerPad.addView(titleRow);
+
+        librarySegHolder = new LinearLayout(this);
+        librarySegHolder.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams segLp = new LinearLayout.LayoutParams(-1, -2);
+        segLp.topMargin = dp(10);
+        headerPad.addView(librarySegHolder, segLp);
+        rebuildLibrarySwitcher();
 
         libraryFilterRow = new LinearLayout(this);
         libraryFilterRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1827,6 +1854,34 @@ public final class MainActivity extends Activity {
         libraryRecycler.setAdapter(libraryAdapter);
         body.addView(libraryRecycler, new FrameLayout.LayoutParams(-1, -1));
 
+        recordsRecycler = new RecyclerView(this);
+        recordsRecycler.setLayoutManager(new LinearLayoutManager(this));
+        recordsRecycler.setPadding(dp(13), dp(6), dp(13), dp(112));
+        recordsRecycler.setClipToPadding(false);
+        recordsRecycler.setItemAnimator(null);
+        recordsRecycler.setVisibility(View.GONE);
+
+        recordAdapter = new GalleryAdapters.RecordAdapter(this, new GalleryAdapters.RecordListener() {
+            @Override public void onViewArtwork(String imageId) {
+                openDetailOverlay(imageId);
+            }
+            @Override public void onRetry(GenerationRecord record) {
+                retryRecord(record);
+            }
+            @Override public void onUsePrompt(String prompt) {
+                usePrompt(prompt);
+            }
+            @Override public void onCopyPrompt(String prompt) {
+                copyPrompt(prompt);
+            }
+            @Override public void onDeleteRecord(String recordId) {
+                GenerationRecord.Repository.deleteRecord(MainActivity.this, recordId);
+                refreshLibraryContent();
+            }
+        });
+        recordsRecycler.setAdapter(recordAdapter);
+        body.addView(recordsRecycler, new FrameLayout.LayoutParams(-1, -1));
+
         libraryEmptyBox = new FrameLayout(this);
         libraryEmptyBox.setPadding(dp(18), dp(20), dp(18), dp(112));
         libraryEmptyBox.setVisibility(View.GONE);
@@ -1850,44 +1905,144 @@ public final class MainActivity extends Activity {
         return out;
     }
 
+    private void rebuildLibrarySwitcher() {
+        if (librarySegHolder == null) return;
+        librarySegHolder.removeAllViews();
+        librarySegHolder.addView(UiKit.segmentedControl(this, new String[]{"成品作品", "生成记录"}, librarySubTab, idx -> {
+            if (librarySubTab != idx) {
+                librarySubTab = idx;
+                rebuildLibrarySwitcher();
+                refreshLibraryContent();
+            }
+        }));
+    }
+
     private void refreshLibraryContent() {
         if (libraryFilterRow == null || libraryAdapter == null) return;
-        String[] allIds = listLocalArtworkIds();
-        librarySubtitleView.setText(allIds.length + " 幅本机作品 · 长按可多选管理");
-        librarySelectBtn.setVisibility(allIds.length > 0 ? View.VISIBLE : View.GONE);
-        librarySelectBtn.setText(librarySelectMode ? "完成" : "选择");
+        rebuildLibrarySwitcher();
 
-        libraryFilterRow.removeAllViews();
-        String[] filters = {"全部", "GPT", "Grok"};
-        for (int i = 0; i < filters.length; i++) {
-            final int idx = i;
-            TextView chip = UiKit.chip(this, filters[i], idx == libraryFilter, () -> {
-                if (libraryFilter != idx) {
-                    libraryFilter = idx;
-                    refreshLibraryContent();
-                }
-            });
-            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
-            if (i > 0) clp.leftMargin = dp(8);
-            libraryFilterRow.addView(chip, clp);
-        }
+        if (librarySubTab == 0) {
+            recordsRecycler.setVisibility(View.GONE);
+            libraryRecycler.setVisibility(View.VISIBLE);
+            libraryClearRecordsBtn.setVisibility(View.GONE);
 
-        List<String> filtered = filteredLibraryIds();
-        librarySelected.retainAll(filtered);
-        libraryBatchCount.setText("已选 " + librarySelected.size() + " 项");
+            String[] allIds = listLocalArtworkIds();
+            librarySubtitleView.setText(allIds.length + " 幅本机作品 · 长按可多选管理");
+            librarySelectBtn.setVisibility(allIds.length > 0 ? View.VISIBLE : View.GONE);
+            librarySelectBtn.setText(librarySelectMode ? "完成" : "选择");
 
-        if (filtered.isEmpty()) {
-            libraryAdapter.setData(Collections.emptyList(), false, Collections.emptySet());
-            String title = allIds.length == 0 ? "作品库还是空的" : "该筛选下暂无作品";
-            String desc = allIds.length == 0
-                    ? "生成的图片会自动保存在本机，随时可欣赏、直存相册或再创作。"
-                    : "切换到「全部」查看已有作品，或去创作一幅新图。";
-            showStateIn(libraryEmptyBox, emptyCard(title, desc, "开始创作", () -> switchTab(0)));
+            libraryFilterRow.setVisibility(View.VISIBLE);
+            libraryFilterRow.removeAllViews();
+            String[] filters = {"全部", "GPT", "Grok"};
+            for (int i = 0; i < filters.length; i++) {
+                final int idx = i;
+                TextView chip = UiKit.chip(this, filters[i], idx == libraryFilter, () -> {
+                    if (libraryFilter != idx) {
+                        libraryFilter = idx;
+                        refreshLibraryContent();
+                    }
+                });
+                LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
+                if (i > 0) clp.leftMargin = dp(8);
+                libraryFilterRow.addView(chip, clp);
+            }
+
+            List<String> filtered = filteredLibraryIds();
+            librarySelected.retainAll(filtered);
+            libraryBatchCount.setText("已选 " + librarySelected.size() + " 项");
+
+            if (filtered.isEmpty()) {
+                libraryAdapter.setData(Collections.emptyList(), false, Collections.emptySet());
+                String title = allIds.length == 0 ? "作品库还是空的" : "该筛选下暂无作品";
+                String desc = allIds.length == 0
+                        ? "生成的图片会自动保存在本机，随时可欣赏、直存相册或再创作。"
+                        : "切换到「全部」查看已有作品，或去创作一幅新图。";
+                showStateIn(libraryEmptyBox, emptyCard(title, desc, "开始创作", () -> switchTab(0)));
+            } else {
+                libraryEmptyBox.setVisibility(View.GONE);
+                libraryAdapter.setData(filtered, librarySelectMode, librarySelected);
+            }
         } else {
-            libraryEmptyBox.setVisibility(View.GONE);
-            libraryAdapter.setData(filtered, librarySelectMode, librarySelected);
+            if (librarySelectMode) exitLibrarySelectMode();
+            libraryRecycler.setVisibility(View.GONE);
+            recordsRecycler.setVisibility(View.VISIBLE);
+            libraryFilterRow.setVisibility(View.GONE);
+            librarySelectBtn.setVisibility(View.GONE);
+
+            List<GenerationRecord> records = GenerationRecord.Repository.getAll(this);
+            librarySubtitleView.setText("共 " + records.size() + " 条生成任务记录 · 实时保存");
+            libraryClearRecordsBtn.setVisibility(records.isEmpty() ? View.GONE : View.VISIBLE);
+
+            if (records.isEmpty()) {
+                recordAdapter.setData(Collections.emptyList());
+                showStateIn(libraryEmptyBox, emptyCard("暂无生成记录", "每次绘制的任务状态、耗时、模型参数与提示词都将完整保存在这里，方便随时复用或重试。", "开始创作", () -> switchTab(0)));
+            } else {
+                libraryEmptyBox.setVisibility(View.GONE);
+                recordAdapter.setData(records);
+            }
         }
         updateFloatingBarsVisibility();
+    }
+
+    private void retryRecord(GenerationRecord record) {
+        if (record == null) return;
+        selectedRoute = Math.max(0, Math.min(1, record.route));
+        if (selectedRoute == 0) {
+            if ("image-2".equals(record.wireModel) || "Grok".equalsIgnoreCase(record.model)) modelLine1 = 1;
+            else modelLine1 = 0;
+        } else {
+            if ("gpt-2.5-flare".equals(record.wireModel)) modelLine2 = 1;
+            else if ("gpt-2.5-sunburst".equals(record.wireModel)) modelLine2 = 2;
+            else if ("gpt-2".equals(record.wireModel)) modelLine2 = 3;
+            else modelLine2 = 0;
+        }
+        setRatioByName(record.ratio);
+        draft = record.prompt;
+        if (promptInput != null) {
+            promptInput.setText(record.prompt);
+            promptInput.setSelection(record.prompt.length());
+        }
+        if (record.hasRef && record.refUriStr != null && !record.refUriStr.isEmpty()) {
+            reference = Uri.parse(record.refUriStr);
+        } else {
+            reference = null;
+        }
+        switchTab(0);
+        refreshHomeDynamic();
+        Toast.makeText(this, "已载入历史生图参数与描述", Toast.LENGTH_SHORT).show();
+    }
+
+    private void usePrompt(String prompt) {
+        if (prompt == null || prompt.isEmpty()) return;
+        draft = prompt;
+        if (promptInput != null) {
+            promptInput.setText(prompt);
+            promptInput.setSelection(prompt.length());
+        }
+        switchTab(0);
+        refreshHomeDynamic();
+        Toast.makeText(this, "已填入画面描述", Toast.LENGTH_SHORT).show();
+    }
+
+    private void copyPrompt(String prompt) {
+        if (prompt == null || prompt.isEmpty()) return;
+        ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) {
+            cm.setPrimaryClip(ClipData.newPlainText("prompt", prompt));
+            Toast.makeText(this, "提示词已复制", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void confirmClearRecords() {
+        new AlertDialog.Builder(this)
+                .setTitle("清空生成记录")
+                .setMessage("确定清空全部生成记录吗？这不会影响已经保存在本地作品库的成品图。")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("清空", (d, w) -> {
+                    GenerationRecord.Repository.clearAll(this);
+                    refreshLibraryContent();
+                    Toast.makeText(this, "生成记录已清空", Toast.LENGTH_SHORT).show();
+                }).show();
     }
 
     private void enterLibrarySelectMode(String initialId) {
@@ -2037,8 +2192,10 @@ public final class MainActivity extends Activity {
                             service.cancelActive();
                             busy = false;
                             uiHandler.removeCallbacks(genTimerTick);
+                            GenerationRecord.Repository.updateStatus(this, activeRecordId, GenerationRecord.STATUS_CANCELLED, null, "用户已中断等待", Math.max(0, System.currentTimeMillis() - genStartMillis));
                             popOverlaysByTag("loading");
                             refreshHomeDynamic();
+                            refreshLibraryContent();
                             updateFloatingBarsVisibility();
                             Toast.makeText(this, "已取消等待", Toast.LENGTH_SHORT).show();
                         }).show());
@@ -2742,11 +2899,23 @@ public final class MainActivity extends Activity {
     }
 
     private void pickReference() {
-        Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT)
-                .addCategory(Intent.CATEGORY_OPENABLE)
-                .setType("image/*");
-        picker.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/jpeg", "image/png", "image/webp"});
-        startActivityForResult(picker, PICK_REFERENCE);
+        Intent picker;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            picker = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            picker.setType("image/*");
+        } else {
+            picker = new Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+            picker.setDataAndType(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, "image/*");
+        }
+        try {
+            startActivityForResult(picker, PICK_REFERENCE);
+        } catch (Exception e) {
+            try {
+                Intent fallback = new Intent(Intent.ACTION_GET_CONTENT);
+                fallback.setType("image/*");
+                startActivityForResult(fallback, PICK_REFERENCE);
+            } catch (Exception ignored) { }
+        }
     }
 
     private void generate() {
@@ -2781,6 +2950,29 @@ public final class MainActivity extends Activity {
         busy = true;
         genStartMillis = System.currentTimeMillis();
         startGenTimer();
+
+        // 记录生成历史任务（运行中）
+        final String recordId = String.valueOf(genStartMillis);
+        activeRecordId = recordId;
+        GenerationRecord record = new GenerationRecord(
+                recordId,
+                genStartMillis,
+                selectedRoute,
+                selectedRoute == 0 ? "线路 1" : "线路 2",
+                activeModel,
+                wireModel,
+                activeRatio,
+                input,
+                activeHasRef,
+                reference != null ? reference.toString() : "",
+                isGrok() && nsfw,
+                GenerationRecord.STATUS_RUNNING,
+                "",
+                "",
+                0L
+        );
+        GenerationRecord.Repository.saveRecord(this, record);
+
         refreshHomeDynamic();
         openLoadingOverlay();
         submit(seq, service, input, wireModel, ratios[ratio], reference, isGrok() && nsfw);
@@ -2814,6 +3006,16 @@ public final class MainActivity extends Activity {
         MainActivity activity = visible;
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
         activity.uiHandler.removeCallbacks(activity.genTimerTick);
+
+        long duration = Math.max(0, System.currentTimeMillis() - genStartMillis);
+        if (wasCancelled) {
+            GenerationRecord.Repository.updateStatus(activity, activeRecordId, GenerationRecord.STATUS_CANCELLED, null, "用户已取消", duration);
+        } else if (error != null) {
+            GenerationRecord.Repository.updateStatus(activity, activeRecordId, GenerationRecord.STATUS_FAILED, null, error, duration);
+        } else if (id != null) {
+            GenerationRecord.Repository.updateStatus(activity, activeRecordId, GenerationRecord.STATUS_SUCCESS, id, null, duration);
+        }
+
         boolean wasWatchingOrb = activity.isOverlayOpen("loading");
         activity.popOverlaysByTag("loading");
         activity.refreshHomeDynamic();
@@ -2916,7 +3118,11 @@ public final class MainActivity extends Activity {
         super.onActivityResult(code, result, intent);
         if (result != RESULT_OK || intent == null || intent.getData() == null) return;
         if (code == PICK_REFERENCE) {
-            reference = intent.getData();
+            Uri picked = intent.getData();
+            try {
+                getContentResolver().takePersistableUriPermission(picked, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) { }
+            reference = picked;
             refreshHomeDynamic();
             return;
         }

@@ -30,6 +30,14 @@ final class GalleryAdapters {
         void onArtworkLongClick(String id);
     }
 
+    interface RecordListener {
+        void onViewArtwork(String imageId);
+        void onRetry(GenerationRecord record);
+        void onUsePrompt(String prompt);
+        void onCopyPrompt(String prompt);
+        void onDeleteRecord(String recordId);
+    }
+
     /** 创意广场 / 提示词画廊 / 收藏 通用双列瀑布流 RecyclerView 适配器 */
     static final class InspirationAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         private static final int TYPE_ITEM = 0;
@@ -444,6 +452,296 @@ final class GalleryAdapters {
                 clp.rightMargin = UiKit.dp(ctx, 9);
                 clp.topMargin = UiKit.dp(ctx, 9);
                 card.addView(checkWrap, clp);
+            }
+        }
+    }
+
+    /** 生成历史记录列表适配器（展示任务状态、用时、参数与重试） */
+    static final class RecordAdapter extends RecyclerView.Adapter<RecordAdapter.Holder> {
+        private final Context context;
+        private final RecordListener listener;
+        private final List<GenerationRecord> records = new ArrayList<>();
+        private static final java.text.SimpleDateFormat SDF = new java.text.SimpleDateFormat("MM-dd HH:mm", Locale.getDefault());
+
+        RecordAdapter(Context context, RecordListener listener) {
+            this.context = context;
+            this.listener = listener;
+        }
+
+        void setData(List<GenerationRecord> list) {
+            records.clear();
+            if (list != null) records.addAll(list);
+            notifyDataSetChanged();
+        }
+
+        @Override
+        public int getItemCount() {
+            return records.size();
+        }
+
+        @Override
+        public Holder onCreateViewHolder(ViewGroup parent, int viewType) {
+            return new Holder(context, listener);
+        }
+
+        @Override
+        public void onBindViewHolder(Holder h, int position) {
+            h.bind(records.get(position));
+        }
+
+        static final class Holder extends RecyclerView.ViewHolder {
+            final LinearLayout card;
+            final TextView statusBadge;
+            final TextView routeBadge;
+            final TextView modelBadge;
+            final TextView ratioBadge;
+            final TextView refBadge;
+            final TextView durationText;
+            final TextView promptText;
+            final TextView errorBox;
+            final FrameLayout previewWrap;
+            final ImageView previewImage;
+            final TextView timeLabel;
+            final LinearLayout primaryActionBtn;
+            final ImageView primaryActionIcon;
+            final TextView primaryActionLabel;
+            final LinearLayout secondaryActionBtn;
+            final ImageView secondaryActionIcon;
+            final TextView secondaryActionLabel;
+            final LinearLayout deleteBtn;
+            private final Context ctx;
+            private final RecordListener listener;
+
+            Holder(Context context, RecordListener listener) {
+                super(new LinearLayout(context));
+                this.ctx = context;
+                this.listener = listener;
+                card = (LinearLayout) itemView;
+                card.setOrientation(LinearLayout.VERTICAL);
+                RecyclerView.LayoutParams rlp = new RecyclerView.LayoutParams(-1, -2);
+                int sideM = UiKit.dp(context, 4);
+                int vertM = UiKit.dp(context, 6);
+                rlp.setMargins(sideM, vertM, sideM, vertM);
+                card.setLayoutParams(rlp);
+                card.setBackground(UiKit.card(context, UiKit.CARD, UiKit.BORDER, 18));
+                card.setPadding(UiKit.dp(context, 14), UiKit.dp(context, 12), UiKit.dp(context, 14), UiKit.dp(context, 12));
+                UiKit.applySoftShadow(card, context, 3, 0x14182638);
+
+                // 1. 顶部状态与标签行
+                LinearLayout topRow = new LinearLayout(context);
+                topRow.setOrientation(LinearLayout.HORIZONTAL);
+                topRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                LinearLayout tagsRow = new LinearLayout(context);
+                tagsRow.setOrientation(LinearLayout.HORIZONTAL);
+                tagsRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                statusBadge = UiKit.softBadge(context, "成功", 0xFFE6F7ED, 0xFF1B8755);
+                routeBadge = UiKit.softBadge(context, "线路 1", 0xFFF0F4FA, UiKit.INK);
+                modelBadge = UiKit.softBadge(context, "GPT", 0xFFF0F4FA, UiKit.BLUE);
+                ratioBadge = UiKit.softBadge(context, "1:1", 0xFFF0F4FA, UiKit.MUTED);
+                refBadge = UiKit.softBadge(context, "图生图", 0xFFFFF4E5, 0xFFD97706);
+
+                tagsRow.addView(statusBadge);
+                LinearLayout.LayoutParams mlp1 = new LinearLayout.LayoutParams(-2, -2);
+                mlp1.leftMargin = UiKit.dp(context, 5);
+                tagsRow.addView(routeBadge, mlp1);
+                LinearLayout.LayoutParams mlp2 = new LinearLayout.LayoutParams(-2, -2);
+                mlp2.leftMargin = UiKit.dp(context, 5);
+                tagsRow.addView(modelBadge, mlp2);
+                LinearLayout.LayoutParams mlp3 = new LinearLayout.LayoutParams(-2, -2);
+                mlp3.leftMargin = UiKit.dp(context, 5);
+                tagsRow.addView(ratioBadge, mlp3);
+                LinearLayout.LayoutParams mlp4 = new LinearLayout.LayoutParams(-2, -2);
+                mlp4.leftMargin = UiKit.dp(context, 5);
+                tagsRow.addView(refBadge, mlp4);
+
+                topRow.addView(tagsRow, new LinearLayout.LayoutParams(0, -2, 1));
+
+                durationText = UiKit.text(context, "", 11, UiKit.MUTED, false);
+                topRow.addView(durationText);
+                card.addView(topRow);
+
+                // 2. 中间内容区（左侧提示词/错误，右侧缩略图）
+                LinearLayout midRow = new LinearLayout(context);
+                midRow.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams midLp = new LinearLayout.LayoutParams(-1, -2);
+                midLp.topMargin = UiKit.dp(context, 9);
+                midLp.bottomMargin = UiKit.dp(context, 9);
+                midRow.setLayoutParams(midLp);
+
+                LinearLayout leftBox = new LinearLayout(context);
+                leftBox.setOrientation(LinearLayout.VERTICAL);
+
+                promptText = UiKit.text(context, "", 13.5f, UiKit.INK, false);
+                promptText.setMaxLines(3);
+                promptText.setEllipsize(TextUtils.TruncateAt.END);
+                promptText.setLineSpacing(UiKit.dp(context, 2), 1f);
+                leftBox.addView(promptText);
+
+                errorBox = UiKit.text(context, "", 11.5f, UiKit.DANGER, false);
+                errorBox.setBackground(UiKit.round(context, UiKit.DANGER_SOFT, 8));
+                errorBox.setPadding(UiKit.dp(context, 8), UiKit.dp(context, 5), UiKit.dp(context, 8), UiKit.dp(context, 5));
+                LinearLayout.LayoutParams elp = new LinearLayout.LayoutParams(-1, -2);
+                elp.topMargin = UiKit.dp(context, 6);
+                leftBox.addView(errorBox, elp);
+                errorBox.setVisibility(View.GONE);
+
+                midRow.addView(leftBox, new LinearLayout.LayoutParams(0, -2, 1));
+
+                // 缩略图
+                previewWrap = new FrameLayout(context);
+                previewWrap.setBackground(UiKit.round(context, UiKit.SOFT, 12));
+                previewWrap.setClipToOutline(true);
+                previewImage = new ImageView(context);
+                previewImage.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                previewWrap.addView(previewImage, new FrameLayout.LayoutParams(-1, -1));
+                LinearLayout.LayoutParams plp = new LinearLayout.LayoutParams(UiKit.dp(context, 56), UiKit.dp(context, 56));
+                plp.leftMargin = UiKit.dp(context, 10);
+                midRow.addView(previewWrap, plp);
+                previewWrap.setVisibility(View.GONE);
+
+                card.addView(midRow);
+
+                // 3. 底部操作栏
+                LinearLayout bottomRow = new LinearLayout(context);
+                bottomRow.setOrientation(LinearLayout.HORIZONTAL);
+                bottomRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                timeLabel = UiKit.text(context, "", 11, UiKit.MUTED, false);
+                bottomRow.addView(timeLabel, new LinearLayout.LayoutParams(0, -2, 1));
+
+                LinearLayout actionRow = new LinearLayout(context);
+                actionRow.setOrientation(LinearLayout.HORIZONTAL);
+                actionRow.setGravity(Gravity.CENTER_VERTICAL);
+
+                primaryActionBtn = new LinearLayout(context);
+                primaryActionBtn.setOrientation(LinearLayout.HORIZONTAL);
+                primaryActionBtn.setGravity(Gravity.CENTER_VERTICAL);
+                primaryActionBtn.setBackground(UiKit.floatingPillBg(context, 14));
+                primaryActionBtn.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 6), UiKit.dp(context, 10), UiKit.dp(context, 6));
+                primaryActionIcon = UiKit.icon(context, R.drawable.ic_sparkles, 13, UiKit.BLUE);
+                primaryActionLabel = UiKit.text(context, "一键重试", 11.5f, UiKit.BLUE, true);
+                primaryActionBtn.addView(primaryActionIcon);
+                LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(-2, -2);
+                alp.leftMargin = UiKit.dp(context, 4);
+                primaryActionBtn.addView(primaryActionLabel, alp);
+                actionRow.addView(primaryActionBtn);
+
+                secondaryActionBtn = new LinearLayout(context);
+                secondaryActionBtn.setOrientation(LinearLayout.HORIZONTAL);
+                secondaryActionBtn.setGravity(Gravity.CENTER_VERTICAL);
+                secondaryActionBtn.setBackground(UiKit.floatingPillBg(context, 14));
+                secondaryActionBtn.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 6), UiKit.dp(context, 10), UiKit.dp(context, 6));
+                secondaryActionIcon = UiKit.icon(context, R.drawable.ic_copy, 12, UiKit.MUTED);
+                secondaryActionLabel = UiKit.text(context, "填入描述", 11.5f, UiKit.MUTED, false);
+                secondaryActionBtn.addView(secondaryActionIcon);
+                LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-2, -2);
+                blp.leftMargin = UiKit.dp(context, 4);
+                secondaryActionBtn.addView(secondaryActionLabel, blp);
+                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+                slp.leftMargin = UiKit.dp(context, 6);
+                actionRow.addView(secondaryActionBtn, slp);
+
+                deleteBtn = UiKit.circleIconBtn(context, R.drawable.ic_trash, UiKit.MUTED, 0xFFF1F4F9, null);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(UiKit.dp(context, 28), UiKit.dp(context, 28));
+                dlp.leftMargin = UiKit.dp(context, 8);
+                actionRow.addView(deleteBtn, dlp);
+
+                bottomRow.addView(actionRow);
+                card.addView(bottomRow);
+            }
+
+            void bind(GenerationRecord r) {
+                switch (r.status) {
+                    case GenerationRecord.STATUS_RUNNING:
+                        statusBadge.setText("绘制中…");
+                        statusBadge.setTextColor(UiKit.BLUE);
+                        statusBadge.setBackground(UiKit.round(ctx, UiKit.BLUE_SOFT, 10));
+                        break;
+                    case GenerationRecord.STATUS_SUCCESS:
+                        statusBadge.setText("绘制成功");
+                        statusBadge.setTextColor(0xFF1B8755);
+                        statusBadge.setBackground(UiKit.round(ctx, 0xFFE6F7ED, 10));
+                        break;
+                    case GenerationRecord.STATUS_FAILED:
+                        statusBadge.setText("绘制失败");
+                        statusBadge.setTextColor(UiKit.DANGER);
+                        statusBadge.setBackground(UiKit.round(ctx, UiKit.DANGER_SOFT, 10));
+                        break;
+                    case GenerationRecord.STATUS_CANCELLED:
+                    default:
+                        statusBadge.setText("已取消");
+                        statusBadge.setTextColor(UiKit.MUTED);
+                        statusBadge.setBackground(UiKit.round(ctx, 0xFFF1F3F5, 10));
+                        break;
+                }
+
+                routeBadge.setText(r.routeName);
+                modelBadge.setText(r.model);
+                ratioBadge.setText(r.ratio);
+                refBadge.setVisibility(r.hasRef ? View.VISIBLE : View.GONE);
+
+                if (r.durationMs > 0) {
+                    durationText.setText(String.format(Locale.ROOT, "耗时 %.1fs", r.durationMs / 1000.0f));
+                    durationText.setVisibility(View.VISIBLE);
+                } else {
+                    durationText.setVisibility(View.GONE);
+                }
+
+                promptText.setText(r.prompt);
+
+                if (r.status == GenerationRecord.STATUS_FAILED && !r.errorMessage.isEmpty()) {
+                    errorBox.setText("失败原因：" + r.errorMessage);
+                    errorBox.setVisibility(View.VISIBLE);
+                } else {
+                    errorBox.setVisibility(View.GONE);
+                }
+
+                timeLabel.setText(SDF.format(new Date(r.timestamp)));
+
+                if (r.status == GenerationRecord.STATUS_SUCCESS && !r.resultImageId.isEmpty()) {
+                    File imgFile = new File(new File(ctx.getFilesDir(), "images"), r.resultImageId);
+                    if (imgFile.isFile()) {
+                        previewWrap.setVisibility(View.VISIBLE);
+                        InspirationRepository.loadLocalThumb(previewImage, imgFile, 200);
+                        previewWrap.setOnClickListener(v -> listener.onViewArtwork(r.resultImageId));
+                    } else {
+                        previewWrap.setVisibility(View.GONE);
+                    }
+                } else {
+                    previewWrap.setVisibility(View.GONE);
+                }
+
+                if (r.status == GenerationRecord.STATUS_SUCCESS) {
+                    primaryActionLabel.setText("查看作品");
+                    primaryActionIcon.setImageResource(R.drawable.ic_images);
+                    primaryActionBtn.setOnClickListener(v -> {
+                        if (!r.resultImageId.isEmpty()) listener.onViewArtwork(r.resultImageId);
+                        else listener.onRetry(r);
+                    });
+
+                    secondaryActionLabel.setText("同款参数");
+                    secondaryActionIcon.setImageResource(R.drawable.ic_wand);
+                    secondaryActionBtn.setOnClickListener(v -> listener.onRetry(r));
+                } else {
+                    primaryActionLabel.setText("一键重试");
+                    primaryActionIcon.setImageResource(R.drawable.ic_refresh);
+                    primaryActionBtn.setOnClickListener(v -> listener.onRetry(r));
+
+                    secondaryActionLabel.setText("填入描述");
+                    secondaryActionIcon.setImageResource(R.drawable.ic_copy);
+                    secondaryActionBtn.setOnClickListener(v -> listener.onUsePrompt(r.prompt));
+                }
+
+                deleteBtn.setOnClickListener(v -> listener.onDeleteRecord(r.recordId));
+                card.setOnClickListener(v -> {
+                    if (r.status == GenerationRecord.STATUS_SUCCESS && !r.resultImageId.isEmpty()) {
+                        listener.onViewArtwork(r.resultImageId);
+                    } else {
+                        listener.onRetry(r);
+                    }
+                });
             }
         }
     }

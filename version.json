@@ -1,6 +1,6 @@
 {
-  "versionCode": 7,
-  "versionName": "0.6.1",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.6.1/Jianyu-v0.6.1.apk",
-  "releaseNotes": "1. 纯净多源密钥架构：彻底移除代码中所有明文密钥，完全由 GitHub Secrets 安全注入。\n2. 线路 1 与 线路 2 双线路无缝切换：支持 GPT / Grok 与 GPT-2.5 多模型及图生图。\n3. 内置 7,100+ 提示词灵感画廊（含 1,740 组精选库）。"
+  "versionCode": 8,
+  "versionName": "0.7.0",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.7.0/Jianyu-v0.7.0.apk",
+  "releaseNotes": "1. 新增生成历史记录体系：完整记录每次生图任务状态（绘制中/成功/失败/已取消）、耗时、模型参数与提示词，支持一键重试、填入描述与复用同款参数。\n2. 参考图直连系统相册：将原有文件管理器选择升级为 Android 原生多媒体系统相册（Photo Picker），直接关联相簿图片。\n3. 作品库支持「成品作品」与「生成记录」双视图自由切换与管理。"
 }
