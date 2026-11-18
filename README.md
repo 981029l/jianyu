@@ -1,0 +1,30 @@
+# 见屿 · Android
+
+见屿是一款浅色安卓生图应用。这个版本支持提示词输入、模型和比例选择、作品查看及保存。作品库存放在设备内，首版关闭提示词广场。概念设计位于 `design/jianyu-concept.png`。
+
+## 用浏览器构建 APK
+
+1. 在 GitHub 新建一个自己有写入权限的仓库。可以选择私有仓库。
+2. 打开上传入口 **Add file → Upload files**。从电脑打开 `D:\Jianyu`，将文件夹内的源码拖入页面。也可以先解压交付的源码 ZIP，再拖入解压后的内容。提交后，仓库首页应能看到 `app/`、`build.gradle` 和 `settings.gradle`。
+3. 确认仓库内存在 `.github/workflows/android.yml`，然后在 **Actions** 打开 **Build Android APK**。上传提交会触发构建。如果 GitHub 提示启用 Actions，启用后可在工作流页面点 **Run workflow** 手动启动。
+4. 打开显示绿色对勾的那次运行，在底部 **Artifacts** 中下载 **Jianyu-debug-apk**。解压下载文件，将 `app-debug.apk` 传到安卓手机安装。支持 Android 8.0 及以上。
+
+如果网页上传忽略了 `.github` 文件夹，在仓库首页点 **Add file → Create new file**。文件名填 `.github/workflows/android.yml`，用记事本打开项目内同名文件，将全部内容粘贴进去并提交。工作流会在该次提交后自动启动。
+
+工作流在 GitHub 托管的 Ubuntu 环境运行，使用 Java 17、Gradle 8.9、Android Gradle Plugin 8.7.3 和 Android SDK 35。APK 使用调试签名，适合安装体验。不同构建的调试签名可能变化，需要长期覆盖升级或发布时请使用自己的固定签名。
+
+## 连接皮皮智绘生图 API
+
+接口依据为项目所有者提供的《皮皮智绘 · 生图 API 说明》（2026-10-25）。Android 客户端沿用项目原有的 HTTPS 网关入口 `JIANYU_IMAGE_ENDPOINT`。现在项目内的 `gateway/server.py` 提供了该网关的实现。修改和运行网关均可在本机完成，无需 Git 仓库。
+
+网关从服务端进程环境变量 `IMAGE_API_KEY` 读取皮皮智绘密钥。在已配置该变量的环境中，从项目根目录运行 `python gateway/server.py`。默认入口为 `http://127.0.0.1:8787/generate`。手机使用服务时，`JIANYU_IMAGE_ENDPOINT` 填写指向该入口的自有 HTTPS 网关地址。密钥只在网关向皮皮智绘发起请求时作为 Bearer 凭据发送。
+
+在创作页输入 1–4000 字的提示词，选择 GPT 或 Grok，点击“生成图片”。网关向 `/api/v1/images/generations` 提交一张图的请求，GPT 使用 `image-1` 和 `auto`（1:1 映射为 `1024x1024`，竖图 3:4/9:16 映射为 `1024x1536`，横图 4:3/16:9 映射为 `1536x1024`），Grok 使用 `image-2` 和 `1k`（保持 1K 比例尺寸，并可在创作页开启“允许 NSFW”开关）。可选一张 4 MiB 以内的 PNG、JPEG 或 WebP 作为参考图，此时走 `/api/v1/images/edits`。返回的图片下载后保存到作品库。
+
+上游返回错误或任务失败时，网关会提取响应中的 `detail`（支持字符串、对象及校验列表）并拼入 `error` 透传给客户端。超时响应带有 `task_id` 时，客户端优先取回原任务，网关使用 `GET /api/v1/tasks/{task_id}` 查询。任务仍在处理时，可在创作页点“继续获取上次作品”。若请求中断且没有取得任务编号，请在皮皮智绘核对任务记录，以免重复扣费。
+
+## 官方资料
+
+- [通过浏览器向仓库添加文件](https://docs.github.com/en/repositories/working-with-files/managing-files/adding-a-file-to-a-repository)
+- [下载 GitHub Actions 构建产物](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)
+- [Android Gradle Plugin 8.7 兼容版本](https://developer.android.com/build/releases/past-releases/agp-8-7-0-release-notes)

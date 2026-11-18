@@ -1,0 +1,26 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'studio.jianyu.app'
+    compileSdk 35
+    defaultConfig {
+        applicationId 'studio.jianyu.app'
+        minSdk 26
+        targetSdk 35
+        versionCode 1
+        versionName '0.1.0'
+        def endpoint = providers.environmentVariable('JIANYU_IMAGE_ENDPOINT').getOrElse('').trim()
+        if (endpoint) {
+            def uri = new URI(endpoint)
+            if (uri.scheme != 'https' || !uri.host || uri.userInfo || uri.query || uri.fragment) {
+                throw new GradleException('JIANYU_IMAGE_ENDPOINT must be a public HTTPS endpoint URL without credentials, query, or fragment')
+            }
+        }
+        buildConfigField 'String', 'IMAGE_ENDPOINT', groovy.json.JsonOutput.toJson(endpoint)
+    }
+    buildFeatures { buildConfig true }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
