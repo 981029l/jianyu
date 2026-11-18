@@ -385,6 +385,8 @@ final class InspirationRepository {
         target.setTag(cacheKey);
         Bitmap cached = MEMORY_CACHE.get(cacheKey);
         if (cached != null && !cached.isRecycled()) {
+            target.animate().cancel();
+            target.setAlpha(1f);
             target.setImageBitmap(cached);
             return;
         }
@@ -395,7 +397,7 @@ final class InspirationRepository {
             if (bitmap != null) {
                 MEMORY_CACHE.put(cacheKey, bitmap);
                 MAIN.post(() -> {
-                    if (cacheKey.equals(target.getTag())) target.setImageBitmap(bitmap);
+                    if (cacheKey.equals(target.getTag())) MotionKit.fadeInBitmap(target, bitmap);
                 });
             }
         });
@@ -408,11 +410,15 @@ final class InspirationRepository {
         target.setTag(fullKey);
         Bitmap fullCached = MEMORY_CACHE.get(fullKey);
         if (fullCached != null && !fullCached.isRecycled()) {
+            target.animate().cancel();
+            target.setAlpha(1f);
             target.setImageBitmap(fullCached);
             return;
         }
         Bitmap thumbCached = thumbUrl != null ? MEMORY_CACHE.get("520:" + thumbUrl) : null;
         if (thumbCached != null && !thumbCached.isRecycled()) {
+            target.animate().cancel();
+            target.setAlpha(1f);
             target.setImageBitmap(thumbCached);
         } else {
             target.setImageDrawable(null);
@@ -424,7 +430,7 @@ final class InspirationRepository {
                 if (thumbBmp != null) {
                     MEMORY_CACHE.put("520:" + thumbUrl, thumbBmp);
                     MAIN.post(() -> {
-                        if (fullKey.equals(target.getTag())) target.setImageBitmap(thumbBmp);
+                        if (fullKey.equals(target.getTag())) MotionKit.fadeInBitmap(target, thumbBmp);
                     });
                 }
             }
@@ -433,7 +439,7 @@ final class InspirationRepository {
                 if (fullBmp != null) {
                     MEMORY_CACHE.put(fullKey, fullBmp);
                     MAIN.post(() -> {
-                        if (fullKey.equals(target.getTag())) target.setImageBitmap(fullBmp);
+                        if (fullKey.equals(target.getTag())) MotionKit.fadeInBitmap(target, fullBmp);
                     });
                 }
             }
@@ -446,6 +452,8 @@ final class InspirationRepository {
         target.setTag(cacheKey);
         Bitmap cached = MEMORY_CACHE.get(cacheKey);
         if (cached != null && !cached.isRecycled()) {
+            target.animate().cancel();
+            target.setAlpha(1f);
             target.setImageBitmap(cached);
             return;
         }
@@ -455,7 +463,7 @@ final class InspirationRepository {
             if (bitmap != null) {
                 MEMORY_CACHE.put(cacheKey, bitmap);
                 MAIN.post(() -> {
-                    if (cacheKey.equals(target.getTag())) target.setImageBitmap(bitmap);
+                    if (cacheKey.equals(target.getTag())) MotionKit.fadeInBitmap(target, bitmap);
                 });
             }
         });

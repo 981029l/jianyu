@@ -143,8 +143,15 @@ final class UiKit {
         btn.setBackground(card(context, bgColor, 0xFFE4ECF6, 22));
         applySoftShadow(btn, context, 5, 0x2B182638);
         btn.setFocusable(true);
-        btn.setOnClickListener(v -> onClick.run());
-        btn.addView(icon(context, iconRes, 19, iconTint));
+        ImageView iv = icon(context, iconRes, 19, iconTint);
+        btn.addView(iv);
+        MotionKit.attachPressSpring(btn, 0.90f);
+        btn.setOnClickListener(v -> {
+            if (iconRes == R.drawable.ic_settings) MotionKit.spinIcon(iv, 60f);
+            else if (iconRes == R.drawable.ic_refresh) MotionKit.spinIcon(iv, 360f);
+            else MotionKit.popIcon(iv);
+            onClick.run();
+        });
         return btn;
     }
 
@@ -155,14 +162,20 @@ final class UiKit {
         btn.setBackground(prismBg(context, 28));
         applySoftShadow(btn, context, 10, 0x662F5CE0);
         btn.setFocusable(true);
-        btn.setOnClickListener(v -> onClick.run());
+        ImageView iv = null;
         if (iconRes != 0) {
-            ImageView iv = icon(context, iconRes, 17, Color.WHITE);
+            iv = icon(context, iconRes, 17, Color.WHITE);
             LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(context, 17), dp(context, 17));
             ilp.rightMargin = dp(context, 7);
             btn.addView(iv, ilp);
         }
         btn.addView(text(context, label, 15, Color.WHITE, true));
+        final ImageView finalIv = iv;
+        MotionKit.attachPressSpring(btn, 0.96f);
+        btn.setOnClickListener(v -> {
+            if (finalIv != null) MotionKit.popIcon(finalIv);
+            onClick.run();
+        });
         return btn;
     }
 
@@ -173,14 +186,20 @@ final class UiKit {
         btn.setBackground(card(context, bgColor, 0xFFE4ECF6, 24));
         applySoftShadow(btn, context, 4, 0x22182638);
         btn.setFocusable(true);
-        btn.setOnClickListener(v -> onClick.run());
+        ImageView iv = null;
         if (iconRes != 0) {
-            ImageView iv = icon(context, iconRes, 16, fgColor);
+            iv = icon(context, iconRes, 16, fgColor);
             LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(context, 16), dp(context, 16));
             ilp.rightMargin = dp(context, 6);
             btn.addView(iv, ilp);
         }
         btn.addView(text(context, label, 13.5f, fgColor, true));
+        final ImageView finalIv = iv;
+        MotionKit.attachPressSpring(btn, 0.96f);
+        btn.setOnClickListener(v -> {
+            if (finalIv != null) MotionKit.popIcon(finalIv);
+            onClick.run();
+        });
         return btn;
     }
 
@@ -192,14 +211,20 @@ final class UiKit {
         pill.setPadding(dp(context, 13), dp(context, 8), dp(context, 13), dp(context, 8));
         pill.setMinimumHeight(dp(context, 36));
         pill.setFocusable(true);
-        pill.setOnClickListener(v -> onClick.run());
+        ImageView iv = null;
         if (iconRes != 0) {
-            ImageView iv = icon(context, iconRes, 14, fgColor);
+            iv = icon(context, iconRes, 14, fgColor);
             LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(dp(context, 14), dp(context, 14));
             ilp.rightMargin = dp(context, 5);
             pill.addView(iv, ilp);
         }
         pill.addView(text(context, label, 12.5f, fgColor, true));
+        final ImageView finalIv = iv;
+        MotionKit.attachPressSpring(pill, 0.93f);
+        pill.setOnClickListener(v -> {
+            if (finalIv != null) MotionKit.popIcon(finalIv);
+            onClick.run();
+        });
         return pill;
     }
 
@@ -211,6 +236,7 @@ final class UiKit {
         view.setBackground(active ? prismBg(context, 18) : liquidGlass(context, 18));
         if (active) applySoftShadow(view, context, 5, 0x442F5CE0);
         view.setFocusable(true);
+        MotionKit.attachPressSpring(view, 0.94f);
         view.setOnClickListener(v -> onClick.run());
         return view;
     }
@@ -297,6 +323,7 @@ final class UiKit {
                 applySoftShadow(item, context, 3, 0x26182638);
             }
             item.setFocusable(true);
+            MotionKit.attachPressSpring(item, 0.95f);
             item.setOnClickListener(v -> listener.onSelect(idx));
             bar.addView(item, new LinearLayout.LayoutParams(0, dp(context, 38), 1));
         }
@@ -311,6 +338,7 @@ final class UiKit {
         if (active) applySoftShadow(card, context, 4, 0x332F5CE0);
         card.setPadding(dp(context, 4), dp(context, 10), dp(context, 4), dp(context, 9));
         card.setFocusable(true);
+        MotionKit.attachPressSpring(card, 0.93f);
         card.setOnClickListener(v -> onClick.run());
 
         int w = 16, h = 16;

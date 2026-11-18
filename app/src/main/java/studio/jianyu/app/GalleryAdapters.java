@@ -134,7 +134,10 @@ final class GalleryAdapters {
             boolean isFav = favKeys.contains(item.uniqueKey());
             h.favIcon.setImageResource(isFav ? R.drawable.ic_heart_filled : R.drawable.ic_heart);
             h.favIcon.setColorFilter(isFav ? 0xFFE5484D : Color.WHITE, PorterDuff.Mode.SRC_IN);
-            h.favBtn.setOnClickListener(v -> listener.onFavoriteToggle(item));
+            h.favBtn.setOnClickListener(v -> {
+                MotionKit.heartBeat(h.favIcon);
+                listener.onFavoriteToggle(item);
+            });
 
             boolean isPlaza = "plaza".equals(item.source);
             if (isPlaza) {
@@ -147,7 +150,10 @@ final class GalleryAdapters {
                     h.topBadge.setVisibility(View.GONE);
                 }
                 h.author.setText(item.author.isEmpty() ? "广场作品" : item.author);
-                h.quickSame.setOnClickListener(v -> listener.onQuickSameClick(item));
+                h.quickSame.setOnClickListener(v -> {
+                    MotionKit.popIcon(h.quickSame);
+                    listener.onQuickSameClick(item);
+                });
             } else {
                 h.plazaBar.setVisibility(View.GONE);
                 h.galleryScrim.setVisibility(View.VISIBLE);
@@ -161,8 +167,8 @@ final class GalleryAdapters {
             h.card.setOnClickListener(v -> {
                 if (hiddenBySafe) {
                     revealedKeys.add(item.uniqueKey());
-                    int idx = holder.getBindingAdapterPosition();
-                    if (idx != RecyclerView.NO_POSITION) notifyItemChanged(idx);
+                    MotionKit.fadeOutAndHide(h.safeCover);
+                    InspirationRepository.loadImage(context, h.image, item.thumbUrl, 520);
                 } else {
                     listener.onItemClick(item);
                 }
@@ -199,6 +205,7 @@ final class GalleryAdapters {
                 card.setClipToOutline(true);
                 UiKit.applySoftShadow(card, ctx, 5, 0x24182638);
                 card.setFocusable(true);
+                MotionKit.attachPressSpring(card, 0.96f);
 
                 image = new ImageView(ctx);
                 image.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -229,7 +236,7 @@ final class GalleryAdapters {
                 tblp.topMargin = UiKit.dp(ctx, 8);
                 card.addView(topBadge, tblp);
 
-                // 右上角收藏心形（40dp 点击热区）
+                // 右上角收藏心形（40dp 点击热区 + 弹性按压）
                 favBtn = new FrameLayout(ctx);
                 FrameLayout.LayoutParams fblp = new FrameLayout.LayoutParams(UiKit.dp(ctx, 40), UiKit.dp(ctx, 40));
                 fblp.gravity = Gravity.TOP | Gravity.END;
@@ -241,6 +248,7 @@ final class GalleryAdapters {
                 FrameLayout.LayoutParams bglp = new FrameLayout.LayoutParams(UiKit.dp(ctx, 30), UiKit.dp(ctx, 30));
                 bglp.gravity = Gravity.CENTER;
                 favBtn.addView(favBg, bglp);
+                MotionKit.attachPressSpring(favBtn, 0.88f);
                 card.addView(favBtn, fblp);
 
                 // 创意广场底部磨砂浮条 + 同款按钮
@@ -258,6 +266,7 @@ final class GalleryAdapters {
                 quickSame = UiKit.text(ctx, "同款", 11, UiKit.BLUE, true);
                 quickSame.setBackground(UiKit.round(ctx, 0xF5FFFFFF, 11));
                 quickSame.setPadding(UiKit.dp(ctx, 10), UiKit.dp(ctx, 5), UiKit.dp(ctx, 10), UiKit.dp(ctx, 5));
+                MotionKit.attachPressSpring(quickSame, 0.90f);
                 LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(-2, -2);
                 qlp.leftMargin = UiKit.dp(ctx, 6);
                 plazaBar.addView(quickSame, qlp);
@@ -377,8 +386,12 @@ final class GalleryAdapters {
             h.checkIcon.setVisibility(isSelected ? View.VISIBLE : View.INVISIBLE);
             h.selectedVeil.setVisibility(isSelected ? View.VISIBLE : View.GONE);
 
-            h.card.setOnClickListener(v -> listener.onArtworkClick(id));
+            h.card.setOnClickListener(v -> {
+                if (selectMode) MotionKit.popIcon(h.checkIcon);
+                listener.onArtworkClick(id);
+            });
             h.card.setOnLongClickListener(v -> {
+                MotionKit.popIcon(h.checkIcon);
                 listener.onArtworkLongClick(id);
                 return true;
             });
@@ -403,6 +416,7 @@ final class GalleryAdapters {
                 card.setClipToOutline(true);
                 UiKit.applySoftShadow(card, ctx, 5, 0x24182638);
                 card.setFocusable(true);
+                MotionKit.attachPressSpring(card, 0.96f);
 
                 image = new ImageView(ctx);
                 image.setScaleType(ImageView.ScaleType.CENTER_CROP);

@@ -74,6 +74,7 @@ public final class MainActivity extends Activity {
     private final List<OverlayEntry> overlayStack = new ArrayList<>();
 
     // 首页持久化控件
+    private LinearLayout heroCardView;
     private View homeUpdateDot;
     private LinearLayout homePendingSlot;
     private LinearLayout homeRefSlot;
@@ -324,6 +325,7 @@ public final class MainActivity extends Activity {
             item.setPadding(dp(12), dp(7), dp(12), dp(7));
             item.setMinimumHeight(dp(48));
             item.setFocusable(true);
+            MotionKit.attachPressSpring(item, 0.94f);
             item.setOnClickListener(v -> switchTab(idx));
 
             ImageView iv = UiKit.icon(this, iconRes[i], 19, UiKit.MUTED);
@@ -405,6 +407,10 @@ public final class MainActivity extends Activity {
             navIcons[i].setColorFilter(tint, PorterDuff.Mode.SRC_IN);
             navLabels[i].setTextColor(tint);
             navLabels[i].setTypeface(android.graphics.Typeface.DEFAULT, active ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+            if (active) {
+                MotionKit.popIcon(navIcons[i]);
+                MotionKit.animateTabEnter(tabContainers[i]);
+            }
         }
         if (index == 0) refreshHomeDynamic();
         else if (index == 1) refreshInspireTab(false);
@@ -416,13 +422,13 @@ public final class MainActivity extends Activity {
         boolean hasOverlay = !overlayStack.isEmpty();
         boolean showBatch = !hasOverlay && !imeVisible && activeTab == 2 && librarySelectMode;
         boolean showNav = !hasOverlay && !imeVisible && !showBatch;
-        floatingNav.setVisibility(showNav ? View.VISIBLE : View.GONE);
-        libraryBatchBar.setVisibility(showBatch ? View.VISIBLE : View.GONE);
+        MotionKit.animateFloatingBar(floatingNav, showNav, 80);
+        MotionKit.animateFloatingBar(libraryBatchBar, showBatch, 80);
 
         boolean loadingOnTop = isOverlayOpen("loading");
         boolean zoomOnTop = isOverlayOpen("zoom");
         boolean showMini = busy && !imeVisible && !loadingOnTop && !zoomOnTop;
-        miniGenBar.setVisibility(showMini ? View.VISIBLE : View.GONE);
+        MotionKit.animateFloatingBar(miniGenBar, showMini, 60);
         if (showMini) {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) miniGenBar.getLayoutParams();
             lp.bottomMargin = dp((showNav || showBatch) ? 86 : 18);
@@ -444,16 +450,19 @@ public final class MainActivity extends Activity {
         overlayStack.add(new OverlayEntry(tag, view));
         overlayHost.addView(view, new FrameLayout.LayoutParams(-1, -1));
         overlayHost.setVisibility(View.VISIBLE);
+        MotionKit.animateOverlayPush(tag, view);
         updateFloatingBarsVisibility();
     }
 
     private void popOverlay() {
         if (overlayStack.isEmpty()) return;
         OverlayEntry top = overlayStack.remove(overlayStack.size() - 1);
-        overlayHost.removeView(top.view);
         if ("loading".equals(top.tag)) loadingTimerView = null;
-        if (overlayStack.isEmpty()) overlayHost.setVisibility(View.GONE);
         updateFloatingBarsVisibility();
+        MotionKit.animateOverlayPop(top.tag, top.view, () -> {
+            overlayHost.removeView(top.view);
+            if (overlayStack.isEmpty()) overlayHost.setVisibility(View.GONE);
+        });
     }
 
     private void popOverlaysByTag(String tag) {
@@ -524,24 +533,30 @@ public final class MainActivity extends Activity {
         heroCard.setBackground(UiKit.liquidGlass(this, 26));
         UiKit.applySoftShadow(heroCard, this, 10, 0x24182638);
         heroCard.setPadding(dp(16), dp(14), dp(16), dp(12));
+        heroCardView = heroCard;
 
         homeRefSlot = new LinearLayout(this);
         homeRefSlot.setOrientation(LinearLayout.VERTICAL);
         heroCard.addView(homeRefSlot, new LinearLayout.LayoutParams(-1, -2));
 
-        promptInput = new EditText(this);
-        promptInput.setGravity(Gravity.TOP | Gravity.START);
+        promptInput = (EditText) getLayoutInflater().inflate(R.layout.prompt_edit_text, heroCard, false);
         promptInput.setTextSize(15.5f);
         promptInput.setTextColor(UiKit.INK);
         promptInput.setHintTextColor(0xFF94A3B8);
-        promptInput.setSingleLine(false);
-        promptInput.setMinLines(4);
-        promptInput.setMaxLines(7);
-        promptInput.setBackground(null);
         promptInput.setHint("描述你想生成的画面，或去「灵感」挑一个同款…");
         promptInput.setText(draft);
         promptInput.setSelection(draft.length());
-        promptInput.setPadding(0, dp(2), 0, dp(10));
+        promptInput.setPadding(0, dp(2), dp(6), dp(10));
+        promptInput.setMovementMethod(new android.text.method.ScrollingMovementMethod());
+        promptInput.setOnTouchListener((v, event) -> {
+            if (promptInput.getLineCount() > promptInput.getMaxLines()) {
+                v.getParent().requestDisallowInterceptTouchEvent(true);
+                if ((event.getAction() & android.view.MotionEvent.ACTION_MASK) == android.view.MotionEvent.ACTION_UP) {
+                    v.getParent().requestDisallowInterceptTouchEvent(false);
+                }
+            }
+            return false;
+        });
         heroCard.addView(promptInput, new LinearLayout.LayoutParams(-1, -2));
 
         View divider = new View(this);
@@ -1147,6 +1162,7 @@ public final class MainActivity extends Activity {
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
             window.setGravity(Gravity.BOTTOM);
             window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT);
+            window.setWindowAnimations(R.style.BottomSheetAnimStyle);
         }
         return dialog;
     }
@@ -2032,8 +2048,10 @@ public final class MainActivity extends Activity {
         ImageView favIcon = UiKit.icon(this, initialFav ? R.drawable.ic_heart_filled : R.drawable.ic_heart, 19,
                 initialFav ? 0xFFE5484D : UiKit.INK);
         favCircle.addView(favIcon);
+        MotionKit.attachPressSpring(favCircle, 0.90f);
         favCircle.setOnClickListener(v -> {
             boolean nowFav = InspirationRepository.toggleFavorite(this, item);
+            MotionKit.heartBeat(favIcon);
             favIcon.setImageResource(nowFav ? R.drawable.ic_heart_filled : R.drawable.ic_heart);
             favIcon.setColorFilter(nowFav ? 0xFFE5484D : UiKit.INK, PorterDuff.Mode.SRC_IN);
             Toast.makeText(this, nowFav ? "已加入灵感收藏" : "已取消收藏", Toast.LENGTH_SHORT).show();
@@ -2547,7 +2565,10 @@ public final class MainActivity extends Activity {
         if (promptInput != null) draft = promptInput.getText().toString();
         String input = draft.trim();
         if (!service.hasPending() && (input.isEmpty() || input.codePointCount(0, input.length()) > 4000)) {
-            if (promptInput != null) promptInput.setError("请输入 1 至 4000 个字符的画面描述");
+            if (promptInput != null) {
+                promptInput.setError("请输入 1 至 4000 个字符的画面描述");
+                if (heroCardView != null) MotionKit.shake(heroCardView);
+            }
             return;
         }
         activePrompt = input;

@@ -1,5 +1,6 @@
 package studio.jianyu.app;
 
+import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Matrix;
 import android.graphics.PointF;
@@ -15,12 +16,12 @@ final class ZoomImageView extends ImageView {
     private static final float MAX_SCALE = 4.5f;
 
     private final Matrix drawMatrix = new Matrix();
-    private final float[] values = new float[9];
     private final PointF lastTouch = new PointF();
     private float baseScale = 1f;
     private float currentZoom = 1f;
     private boolean dragging = false;
     private Runnable onSingleTap;
+    private ValueAnimator zoomAnimator;
 
     private final ScaleGestureDetector scaleDetector;
     private final GestureDetector gestureDetector;
@@ -30,6 +31,7 @@ final class ZoomImageView extends ImageView {
         setScaleType(ScaleType.MATRIX);
         scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
             @Override public boolean onScale(ScaleGestureDetector detector) {
+                cancelZoomAnim();
                 float factor = detector.getScaleFactor();
                 float targetZoom = clamp(currentZoom * factor, MIN_SCALE, MAX_SCALE);
                 float delta = targetZoom / currentZoom;
@@ -43,14 +45,9 @@ final class ZoomImageView extends ImageView {
         gestureDetector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
             @Override public boolean onDoubleTap(MotionEvent e) {
                 if (currentZoom > 1.2f) {
-                    fitToScreen();
+                    animateZoomTo(1f, getWidth() * 0.5f, getHeight() * 0.5f);
                 } else {
-                    float target = 2.6f;
-                    float delta = target / currentZoom;
-                    currentZoom = target;
-                    drawMatrix.postScale(delta, delta, e.getX(), e.getY());
-                    fixBounds();
-                    setImageMatrix(drawMatrix);
+                    animateZoomTo(2.6f, e.getX(), e.getY());
                 }
                 return true;
             }
@@ -60,6 +57,31 @@ final class ZoomImageView extends ImageView {
                 return true;
             }
         });
+    }
+
+    private void cancelZoomAnim() {
+        if (zoomAnimator != null) {
+            zoomAnimator.cancel();
+            zoomAnimator = null;
+        }
+    }
+
+    private void animateZoomTo(float targetZoom, float focusX, float focusY) {
+        cancelZoomAnim();
+        final float startZoom = currentZoom;
+        zoomAnimator = ValueAnimator.ofFloat(startZoom, targetZoom);
+        zoomAnimator.setDuration(260);
+        zoomAnimator.setInterpolator(MotionKit.APPLE_EASE_OUT);
+        zoomAnimator.addUpdateListener(anim -> {
+            float next = (float) anim.getAnimatedValue();
+            if (currentZoom <= 0f) return;
+            float delta = next / currentZoom;
+            currentZoom = next;
+            drawMatrix.postScale(delta, delta, focusX, focusY);
+            fixBounds();
+            setImageMatrix(drawMatrix);
+        });
+        zoomAnimator.start();
     }
 
     void setOnSingleTap(Runnable action) {

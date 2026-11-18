@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<EditText xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@null"
+    android:fadeScrollbars="false"
+    android:gravity="top|start"
+    android:inputType="textMultiLine|textCapSentences"
+    android:maxLines="7"
+    android:minLines="4"
+    android:overScrollMode="always"
+    android:scrollbarAlwaysDrawVerticalTrack="false"
+    android:scrollbarSize="4dp"
+    android:scrollbarStyle="insideOverlay"
+    android:scrollbarThumbVertical="@drawable/scrollbar_thumb"
+    android:scrollbars="vertical" />
