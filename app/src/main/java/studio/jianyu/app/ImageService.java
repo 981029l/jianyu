@@ -43,21 +43,6 @@ final class ImageService {
 
     boolean isDirectMode() { return BuildConfig.IMAGE_ENDPOINT.isEmpty(); }
     boolean isConfigured() { return !isDirectMode() || !activeKeys().isEmpty(); }
-    int keyCount() { return activeKeys().size(); }
-    int builtInKeyCount() { return parseKeys(BuildConfig.IMAGE_API_KEYS).size(); }
-    boolean hasCustomKeys() { return !parseKeys(config.getString("api_keys", "")).isEmpty(); }
-    String customKeysText() { return config.getString("api_keys", ""); }
-
-    int saveCustomKeys(String raw) {
-        List<String> keys = parseKeys(raw);
-        StringBuilder joined = new StringBuilder();
-        for (int i = 0; i < keys.size(); i++) {
-            if (i > 0) joined.append('\n');
-            joined.append(keys.get(i));
-        }
-        config.edit().putString("api_keys", joined.toString()).putInt("key_cursor", 0).commit();
-        return keys.size();
-    }
 
     static List<String> parseKeys(String raw) {
         List<String> result = new ArrayList<>();
@@ -71,8 +56,7 @@ final class ImageService {
     }
 
     private List<String> activeKeys() {
-        List<String> custom = parseKeys(config.getString("api_keys", ""));
-        return custom.isEmpty() ? parseKeys(BuildConfig.IMAGE_API_KEYS) : custom;
+        return parseKeys(BuildConfig.IMAGE_API_KEYS);
     }
 
     private synchronized String nextKey(List<String> keys) {

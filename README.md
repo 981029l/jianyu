@@ -17,7 +17,7 @@
 
 接口依据为项目所有者提供的《皮皮智绘 · 生图 API 说明》（2026-10-25）。支持两种接入方式：
 
-1. **手机直连模式（推荐自用，无需服务器）**：未配置 `JIANYU_IMAGE_ENDPOINT` 时，Android 客户端直接请求 `https://img.pipiwangcom.com/api/v1`，并内置多密钥顺序轮询与任务归属保持。可在 GitHub 仓库 **Settings → Secrets and variables → Actions → Secrets** 添加 `IMAGE_API_KEYS`（多个密钥用逗号或换行分隔），打包 APK 时自动注入；也可在 App 创作页点击密钥状态行随时增改密钥。
+1. **手机直连模式（推荐自用，无需服务器）**：未配置 `JIANYU_IMAGE_ENDPOINT` 时，Android 客户端直接请求 `https://img.pipiwangcom.com/api/v1`，并内置多密钥顺序轮询与任务归属保持。在 GitHub 仓库 **Settings → Secrets and variables → Actions → Secrets** 添加 `IMAGE_API_KEYS`（多个密钥用逗号或换行分隔），打包 APK 时自动内置，App 界面不提供密钥填写入口。
 2. **可选网关模式（适合对外分发）**：如需将密钥留在服务端，可部署项目内的 `gateway/server.py`（从环境变量或本地 `.env` 读取 `IMAGE_API_KEYS` / `IMAGE_API_KEY`），并在构建变量中设置 `JIANYU_IMAGE_ENDPOINT` 为你的 HTTPS 网关地址。
 
 在创作页输入 1–4000 字的提示词，选择 GPT 或 Grok，点击“生成图片”。请求向 `/api/v1/images/generations` 提交一张图的任务，GPT 使用 `image-1` 和 `auto`（1:1 映射为 `1024x1024`，竖图 3:4/9:16 映射为 `1024x1536`，横图 4:3/16:9 映射为 `1536x1024`），Grok 使用 `image-2` 和 `1k`（保持 1K 比例尺寸，并可在创作页开启“允许 NSFW”开关）。可选一张 4 MiB 以内的 PNG、JPEG 或 WebP 作为参考图，此时走 `/api/v1/images/edits`。返回的图片下载后保存到作品库。

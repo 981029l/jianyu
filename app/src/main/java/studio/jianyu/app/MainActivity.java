@@ -148,63 +148,8 @@ public final class MainActivity extends Activity {
         if (pending && !busy) add(action("放弃取回上次作品", PAPER, MUTED, () -> new AlertDialog.Builder(this)
                 .setMessage("移除本机的取图记录？这不会取消服务端任务。")
                 .setNegativeButton("返回", null).setPositiveButton("移除", (d,w) -> { service.forget(); home(); }).show()), 42, 4);
-        if (service.isDirectMode()) {
-            String keyLabel = service.isConfigured()
-                    ? "已启用 " + service.keyCount() + " 个密钥轮询（管理密钥）"
-                    : "尚未配置生图密钥（点击设置）";
-            TextView keyStatus = text(keyLabel, 13, service.isConfigured() ? MUTED : BLUE, !service.isConfigured());
-            keyStatus.setPadding(dp(4), dp(6), dp(4), dp(6));
-            keyStatus.setFocusable(true);
-            keyStatus.setOnClickListener(v -> editApiKeys());
-            add(keyStatus, -2, 6);
-        }
+        if (!service.isConfigured()) add(text("预览版 · 尚未连接生图服务", 12, MUTED, false), -2, 8);
         add(text("示例作品",16,INK,true),-2,22);ImageView cover=new ImageView(this);cover.setImageResource(R.drawable.coast);cover.setScaleType(ImageView.ScaleType.CENTER_CROP);cover.setContentDescription("查看示例作品海岸晨光");cover.setBackground(box(SOFT,15));cover.setClipToOutline(true);cover.setOnClickListener(v->detail(""));add(cover,136,8);nav();
-    }
-    private void editApiKeys() {
-        LinearLayout container = new LinearLayout(this);
-        container.setOrientation(LinearLayout.VERTICAL);
-        container.setPadding(dp(20), dp(10), dp(20), dp(4));
-        String tip = "支持多个密钥（逗号或换行分隔），每次生图自动轮询。";
-        if (service.builtInKeyCount() > 0) {
-            tip += "\n当前 APK 已内置 " + service.builtInKeyCount() + " 个密钥；留空保存即可使用内置密钥。";
-        }
-        container.addView(text(tip, 13, MUTED, false));
-        EditText input = new EditText(this);
-        input.setSingleLine(false);
-        input.setMinLines(4);
-        input.setGravity(Gravity.TOP | Gravity.START);
-        input.setTextSize(14);
-        input.setTextColor(INK);
-        input.setHintTextColor(MUTED);
-        input.setHint("sk-...\nsk-...");
-        input.setText(service.customKeysText());
-        input.setPadding(dp(12), dp(10), dp(12), dp(10));
-        GradientDrawable field = box(Color.WHITE, 12);
-        field.setStroke(dp(1), 0xffcfd8e4);
-        input.setBackground(field);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
-        lp.topMargin = dp(10);
-        container.addView(input, lp);
-        AlertDialog.Builder dialog = new AlertDialog.Builder(this)
-                .setTitle("API 密钥设置")
-                .setView(container)
-                .setPositiveButton("保存", (d, w) -> {
-                    int saved = service.saveCustomKeys(input.getText().toString());
-                    String msg = saved > 0 ? "已保存 " + saved + " 个自定义密钥"
-                            : service.builtInKeyCount() > 0 ? "已恢复使用内置 " + service.builtInKeyCount() + " 个密钥"
-                            : "已清空自定义密钥";
-                    Toast.makeText(this, msg, Toast.LENGTH_SHORT).show();
-                    home();
-                })
-                .setNegativeButton("取消", null);
-        if (service.hasCustomKeys() && service.builtInKeyCount() > 0) {
-            dialog.setNeutralButton("恢复内置", (d, w) -> {
-                service.saveCustomKeys("");
-                Toast.makeText(this, "已恢复使用内置 " + service.builtInKeyCount() + " 个密钥", Toast.LENGTH_SHORT).show();
-                home();
-            });
-        }
-        dialog.show();
     }
     private void pickReference() {
         Intent picker = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*");
@@ -219,10 +164,9 @@ public final class MainActivity extends Activity {
         if(busy)return;
         if(!service.isConfigured()){
             new AlertDialog.Builder(this)
-                    .setTitle("尚未配置生图密钥")
-                    .setMessage("请先设置生图 API 密钥（支持多密钥轮询），或先预览内置示例作品。")
-                    .setPositiveButton("设置密钥", (d, w) -> editApiKeys())
-                    .setNeutralButton("查看示例", (d, w) -> detail(""))
+                    .setTitle("生图服务尚未连接")
+                    .setMessage("当前可预览示例作品。应用接入服务后即可用自己的提示词生成图片。")
+                    .setPositiveButton("查看示例", (d, w) -> detail(""))
                     .setNegativeButton("返回", null)
                     .show();
             return;
