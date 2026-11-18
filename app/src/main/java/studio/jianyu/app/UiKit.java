@@ -323,6 +323,7 @@ final class UiKit {
             TextView item = text(context, labels[i], textSize, active ? BLUE : MUTED, true);
             item.setGravity(Gravity.CENTER);
             item.setSingleLine(true);
+            item.setPadding(dp(context, 8), 0, dp(context, 8), 0);
             if (active) {
                 item.setBackground(round(context, CARD, 18));
                 applySoftShadow(item, context, 3, 0x26182638);

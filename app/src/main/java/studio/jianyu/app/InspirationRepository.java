@@ -258,10 +258,14 @@ final class InspirationRepository {
         Set<String> seenIds = new HashSet<>(14000);
 
         // 1. 本地内置 6,601 条全网热榜提示词库（经清洗，零多余字样，离线秒开）
-        try (InputStream raw = context.getAssets().open("prompts_hot.json.gz");
-             InputStream in = new GZIPInputStream(raw)) {
+        try (InputStream in = context.getAssets().open("prompts_hot.json")) {
             parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("hot"), seenIds, "hot");
-        } catch (Exception ignored) { }
+        } catch (Exception e1) {
+            try (InputStream raw = context.getAssets().open("prompts_hot.json.gz");
+                 InputStream in = new GZIPInputStream(raw)) {
+                parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("hot"), seenIds, "hot");
+            } catch (Exception ignored) { }
+        }
 
         // 2. 本地内置 1,740 条设计大类精选提示词库
         try (InputStream in = context.getAssets().open("prompts_addon.json")) {

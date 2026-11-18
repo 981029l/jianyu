@@ -1571,7 +1571,7 @@ public final class MainActivity extends Activity {
                 rebuildPromptSourceSwitcher();
                 refreshPromptTab(true);
             }
-        }));
+        }), new LinearLayout.LayoutParams(-1, -2));
     }
 
     private void applyPromptSearch() {
@@ -1928,7 +1928,7 @@ public final class MainActivity extends Activity {
         headerPad.addView(titleRow);
 
         librarySegHolder = new LinearLayout(this);
-        librarySegHolder.setOrientation(LinearLayout.HORIZONTAL);
+        librarySegHolder.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams segLp = new LinearLayout.LayoutParams(-1, -2);
         segLp.topMargin = dp(10);
         headerPad.addView(librarySegHolder, segLp);
@@ -2022,13 +2022,13 @@ public final class MainActivity extends Activity {
     private void rebuildLibrarySwitcher() {
         if (librarySegHolder == null) return;
         librarySegHolder.removeAllViews();
-        librarySegHolder.addView(UiKit.segmentedControl(this, new String[]{"成品作品", "生成记录"}, librarySubTab, idx -> {
+        librarySegHolder.addView(UiKit.segmentedControl(this, new String[]{"成品作品", "生成记录"}, librarySubTab, 13.5f, idx -> {
             if (librarySubTab != idx) {
                 librarySubTab = idx;
                 rebuildLibrarySwitcher();
                 refreshLibraryContent();
             }
-        }));
+        }), new LinearLayout.LayoutParams(-1, -2));
     }
 
     private void refreshLibraryContent() {
