@@ -15,13 +15,14 @@
 
 ## 连接皮皮智绘生图 API
 
-接口依据为项目所有者提供的《皮皮智绘 · 生图 API 说明》（2026-10-25）。Android 客户端沿用项目原有的 HTTPS 网关入口 `JIANYU_IMAGE_ENDPOINT`。现在项目内的 `gateway/server.py` 提供了该网关的实现。修改和运行网关均可在本机完成，无需 Git 仓库。
+接口依据为项目所有者提供的《皮皮智绘 · 生图 API 说明》（2026-10-25）。支持两种接入方式：
 
-网关从服务端进程环境变量 `IMAGE_API_KEY` 读取皮皮智绘密钥。在已配置该变量的环境中，从项目根目录运行 `python gateway/server.py`。默认入口为 `http://127.0.0.1:8787/generate`。手机使用服务时，`JIANYU_IMAGE_ENDPOINT` 填写指向该入口的自有 HTTPS 网关地址。密钥只在网关向皮皮智绘发起请求时作为 Bearer 凭据发送。
+1. **手机直连模式（推荐自用，无需服务器）**：未配置 `JIANYU_IMAGE_ENDPOINT` 时，Android 客户端直接请求 `https://img.pipiwangcom.com/api/v1`，并内置多密钥顺序轮询与任务归属保持。可在 GitHub 仓库 **Settings → Secrets and variables → Actions → Secrets** 添加 `IMAGE_API_KEYS`（多个密钥用逗号或换行分隔），打包 APK 时自动注入；也可在 App 创作页点击密钥状态行随时增改密钥。
+2. **可选网关模式（适合对外分发）**：如需将密钥留在服务端，可部署项目内的 `gateway/server.py`（从环境变量或本地 `.env` 读取 `IMAGE_API_KEYS` / `IMAGE_API_KEY`），并在构建变量中设置 `JIANYU_IMAGE_ENDPOINT` 为你的 HTTPS 网关地址。
 
-在创作页输入 1–4000 字的提示词，选择 GPT 或 Grok，点击“生成图片”。网关向 `/api/v1/images/generations` 提交一张图的请求，GPT 使用 `image-1` 和 `auto`（1:1 映射为 `1024x1024`，竖图 3:4/9:16 映射为 `1024x1536`，横图 4:3/16:9 映射为 `1536x1024`），Grok 使用 `image-2` 和 `1k`（保持 1K 比例尺寸，并可在创作页开启“允许 NSFW”开关）。可选一张 4 MiB 以内的 PNG、JPEG 或 WebP 作为参考图，此时走 `/api/v1/images/edits`。返回的图片下载后保存到作品库。
+在创作页输入 1–4000 字的提示词，选择 GPT 或 Grok，点击“生成图片”。请求向 `/api/v1/images/generations` 提交一张图的任务，GPT 使用 `image-1` 和 `auto`（1:1 映射为 `1024x1024`，竖图 3:4/9:16 映射为 `1024x1536`，横图 4:3/16:9 映射为 `1536x1024`），Grok 使用 `image-2` 和 `1k`（保持 1K 比例尺寸，并可在创作页开启“允许 NSFW”开关）。可选一张 4 MiB 以内的 PNG、JPEG 或 WebP 作为参考图，此时走 `/api/v1/images/edits`。返回的图片下载后保存到作品库。
 
-上游返回错误或任务失败时，网关会提取响应中的 `detail`（支持字符串、对象及校验列表）并拼入 `error` 透传给客户端。超时响应带有 `task_id` 时，客户端优先取回原任务，网关使用 `GET /api/v1/tasks/{task_id}` 查询。任务仍在处理时，可在创作页点“继续获取上次作品”。若请求中断且没有取得任务编号，请在皮皮智绘核对任务记录，以免重复扣费。
+上游返回错误或任务失败时，会提取响应中的 `detail`（支持字符串、对象及校验列表）并展示在错误提示中。超时响应带有 `task_id` 时，客户端优先使用提交该任务的原密钥通过 `GET /api/v1/tasks/{task_id}` 取回原任务。任务仍在处理时，可在创作页点“继续获取上次作品”。若请求中断且没有取得任务编号，请在皮皮智绘核对任务记录，以免重复扣费。
 
 ## 官方资料
 

@@ -17,6 +17,9 @@ android {
             }
         }
         buildConfigField 'String', 'IMAGE_ENDPOINT', groovy.json.JsonOutput.toJson(endpoint)
+        def apiKeys = providers.environmentVariable('IMAGE_API_KEYS').getOrElse(
+                providers.environmentVariable('IMAGE_API_KEY').getOrElse('')).trim()
+        buildConfigField 'String', 'IMAGE_API_KEYS', groovy.json.JsonOutput.toJson(apiKeys)
     }
     buildFeatures { buildConfig true }
     compileOptions {

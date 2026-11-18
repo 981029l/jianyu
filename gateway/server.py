@@ -1,7 +1,10 @@
+from collections import OrderedDict
 import json
 import os
+from pathlib import Path
 import re
 import socket
+import threading
 from http.client import HTTPException
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
@@ -21,6 +24,79 @@ TIMEOUT = 1900
 MAX_REQUEST = 6 * 1024 * 1024
 MAX_RESULT = 1024 * 1024
 MAX_DETAIL = 300
+MAX_TASK_KEYS = 2000
+
+
+def parse_keys(raw):
+    if not raw:
+        return []
+    keys = []
+    for part in re.split(r'[\s,;]+', raw.strip()):
+        if part and part not in keys:
+            keys.append(part)
+    return keys
+
+
+def load_dotenv(*paths):
+    for path in paths:
+        file_path = Path(path)
+        if not file_path.is_file():
+            continue
+        for line in file_path.read_text(encoding='utf-8').splitlines():
+            text = line.strip()
+            if not text or text.startswith('#') or '=' not in text:
+                continue
+            name, value = text.split('=', 1)
+            name = name.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            if name:
+                os.environ.setdefault(name, value)
+
+
+def load_keys(env=None):
+    source = os.environ if env is None else env
+    return parse_keys(source.get('IMAGE_API_KEYS') or source.get('IMAGE_API_KEY') or '')
+
+
+class KeyPool:
+    def __init__(self, keys):
+        self._keys = list(keys)
+        if not self._keys:
+            raise ValueError('密钥列表不能为空。')
+        self._index = 0
+        self._tasks = OrderedDict()
+        self._lock = threading.Lock()
+
+    def __len__(self):
+        return len(self._keys)
+
+    def next_key(self):
+        with self._lock:
+            key = self._keys[self._index]
+            self._index = (self._index + 1) % len(self._keys)
+            return key
+
+    def remember(self, task_id, key):
+        if not task_id or not key:
+            return
+        with self._lock:
+            self._tasks[task_id] = key
+            self._tasks.move_to_end(task_id)
+            while len(self._tasks) > MAX_TASK_KEYS:
+                self._tasks.popitem(last=False)
+
+    def forget(self, task_id):
+        if not task_id:
+            return
+        with self._lock:
+            self._tasks.pop(task_id, None)
+
+    def keys_for_task(self, task_id):
+        with self._lock:
+            owner = self._tasks.get(task_id)
+            return [owner] if owner else list(self._keys)
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -161,6 +237,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def key_pool(self):
+        pool = getattr(self.server, 'key_pool', None)
+        if pool is not None:
+            return pool
+        key = getattr(self.server, 'api_key', '')
+        return KeyPool([key]) if key else None
+
     def handle_api(self):
         url = urlsplit(self.path)
         if url.path != '/generate':
@@ -180,9 +263,29 @@ class Handler(BaseHTTPRequestHandler):
                 path, payload = generation(json.loads(self.rfile.read(length)))
         except (ValueError, UnicodeError) as exc:
             return self.reply(400, {'error': str(exc)})
+        pool = self.key_pool()
+        if pool is None:
+            return self.reply(500, {'error': '网关未配置皮皮智绘密钥。'})
         try:
-            status, body = upstream(path, payload, self.server.api_key)
-            status, result = outcome(status, body, task)
+            if self.command == 'GET':
+                used_key = None
+                status, body = 502, {}
+                for candidate in pool.keys_for_task(task):
+                    used_key = candidate
+                    status, body = upstream(path, None, candidate)
+                    if status not in (401, 403, 404):
+                        break
+                status, result = outcome(status, body, task)
+                if status in (200, 410):
+                    pool.forget(task)
+                elif status == 202 and used_key:
+                    pool.remember(task, used_key)
+            else:
+                used_key = pool.next_key()
+                status, body = upstream(path, payload, used_key)
+                status, result = outcome(status, body, task)
+                if status == 202 and result.get('task_id'):
+                    pool.remember(result['task_id'], used_key)
         except (URLError, OSError, HTTPException):
             status, result = 502, {'error': '与皮皮智绘的连接中断，请核对原任务后再发起生成。'}
         self.reply(status, result)
@@ -191,10 +294,12 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == '__main__':
-    key = os.getenv('IMAGE_API_KEY', '').strip()
-    if not key:
-        raise SystemExit('请在网关进程环境中配置 IMAGE_API_KEY。')
+    root_dir = Path(__file__).resolve().parent.parent
+    load_dotenv(root_dir / '.env', Path(__file__).resolve().parent / '.env')
+    keys = load_keys()
+    if not keys:
+        raise SystemExit('请在环境变量或 .env 中配置 IMAGE_API_KEYS（或 IMAGE_API_KEY）。')
     with ThreadingHTTPServer(('127.0.0.1', int(os.getenv('PORT', '8787'))), Handler) as server:
-        server.api_key = key
-        print(f'见屿网关监听 127.0.0.1:{server.server_port}', flush=True)
+        server.key_pool = KeyPool(keys)
+        print(f'见屿网关监听 127.0.0.1:{server.server_port}（已加载 {len(keys)} 个密钥轮询）', flush=True)
         server.serve_forever()

@@ -163,6 +163,43 @@ class Integration(unittest.TestCase):
         self.assertEqual(len(body['detail']), server.MAX_DETAIL)
         self.assertTrue(body['detail'].endswith('…'))
 
+    def test_key_pool_round_robin_and_task_affinity(self):
+        pool = server.KeyPool(['key-1', 'key-2', 'key-3'])
+        with patch.object(self.gateway, 'key_pool', pool, create=True):
+            self.provider.answers.extend([
+                (200, {'data': [{'url': self.image}]}),
+                (504, {'detail': {'message': 'timeout', 'task_id': 202}}),
+                (200, {'data': [{'url': self.image}]}),
+                (200, {'data': [{'url': self.image}]}),
+                (200, {'result': {'data': [{'url': self.image}]}}),
+                (404, {'detail': 'not found'}),
+                (200, {'result': {'data': [{'url': self.image}]}}),
+            ])
+            self.assertEqual(self.call(body=self.form)[0], 200)
+            self.assertEqual(self.call(body=self.form), (202, {'task_id': '202'}))
+            self.assertEqual(self.call(body=self.form)[0], 200)
+            self.assertEqual(self.call(body=self.form)[0], 200)
+            # task 202 归属 key-2，查询时必须使用 key-2
+            self.assertEqual(self.call('/generate?task_id=202')[0], 200)
+            # 未知 task 303（如重启后）在 key-1 返回 404 时继续尝试 key-2 找回
+            self.assertEqual(self.call('/generate?task_id=303')[0], 200)
+
+        auths = [(c[0], c[1], c[2]) for c in self.provider.calls]
+        self.assertEqual(auths, [
+            ('POST', '/api/v1/images/generations', 'Bearer key-1'),
+            ('POST', '/api/v1/images/generations', 'Bearer key-2'),
+            ('POST', '/api/v1/images/generations', 'Bearer key-3'),
+            ('POST', '/api/v1/images/generations', 'Bearer key-1'),
+            ('GET', '/api/v1/tasks/202', 'Bearer key-2'),
+            ('GET', '/api/v1/tasks/303', 'Bearer key-1'),
+            ('GET', '/api/v1/tasks/303', 'Bearer key-2'),
+        ])
+
+    def test_parse_and_load_keys(self):
+        self.assertEqual(server.parse_keys('k1, k2\nk3;k1'), ['k1', 'k2', 'k3'])
+        self.assertEqual(server.load_keys({'IMAGE_API_KEYS': 'a,b', 'IMAGE_API_KEY': 'c'}), ['a', 'b'])
+        self.assertEqual(server.load_keys({'IMAGE_API_KEY': 'c,d'}), ['c', 'd'])
+
 
 if __name__ == '__main__':
     unittest.main()
