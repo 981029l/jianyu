@@ -166,7 +166,7 @@ final class ImageService {
             JSONObject result = new JSONObject();
             String usedKey = taskKey;
             if (submit) {
-                if (keys.isEmpty()) throw new IOException("请先配置皮皮智绘 API 密钥。");
+                if (keys.isEmpty()) throw new IOException("请先配置生图 API 密钥。");
                 usedKey = nextKey(keys);
                 boolean isGrok = "Image 2".equals(model);
                 String upstreamModel = isGrok ? "image-2" : "image-1";
@@ -199,7 +199,7 @@ final class ImageService {
                 for (String key : keys) {
                     if (!candidates.contains(key)) candidates.add(key);
                 }
-                if (candidates.isEmpty()) throw new IOException("请先配置皮皮智绘 API 密钥。");
+                if (candidates.isEmpty()) throw new IOException("请先配置生图 API 密钥。");
                 for (String candidate : candidates) {
                     usedKey = candidate;
                     HttpsURLConnection conn = open(new URL(API_BASE + "/tasks/" + Uri.encode(task)), 60000);
@@ -226,8 +226,8 @@ final class ImageService {
                 if (!task.isEmpty()) savePending(prompt, task, "", usedKey);
                 String base;
                 if (status == 400 || status == 422) base = "检查提示词、模型及参考图。";
-                else if (status == 401) base = "请检查皮皮智绘 API 密钥。";
-                else if (status == 403) base = "请检查皮皮智绘账户权限。";
+                else if (status == 401) base = "请检查生图 API 密钥。";
+                else if (status == 403) base = "请检查生图服务账户权限。";
                 else if (status == 429) base = "请求过于频繁，请稍后再试。";
                 else base = "服务未返回作品，请核对任务记录。";
                 throw new IOException(formatError(base, detailText));
@@ -254,7 +254,7 @@ final class ImageService {
                     || (container.has("delivered_count") && container.optInt("delivered_count", -1) == 0 && !activeState);
             if (failed) {
                 forget();
-                throw new IOException(formatError("任务未交付图片，请在皮皮智绘核对任务与积分记录。", detailText));
+                throw new IOException(formatError("任务未交付图片，请核对任务与额度记录。", detailText));
             }
             boolean doneState = "completed".equals(state) || "done".equals(state)
                     || "succeeded".equals(state) || "success".equals(state);

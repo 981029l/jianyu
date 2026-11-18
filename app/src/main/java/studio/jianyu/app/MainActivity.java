@@ -150,8 +150,8 @@ public final class MainActivity extends Activity {
                 .setNegativeButton("返回", null).setPositiveButton("移除", (d,w) -> { service.forget(); home(); }).show()), 42, 4);
         if (service.isDirectMode()) {
             String keyLabel = service.isConfigured()
-                    ? "直连皮皮智绘 · 已启用 " + service.keyCount() + " 个密钥轮询（管理密钥）"
-                    : "尚未配置皮皮智绘密钥（点击设置）";
+                    ? "已启用 " + service.keyCount() + " 个密钥轮询（管理密钥）"
+                    : "尚未配置生图密钥（点击设置）";
             TextView keyStatus = text(keyLabel, 13, service.isConfigured() ? MUTED : BLUE, !service.isConfigured());
             keyStatus.setPadding(dp(4), dp(6), dp(4), dp(6));
             keyStatus.setFocusable(true);
@@ -186,7 +186,7 @@ public final class MainActivity extends Activity {
         lp.topMargin = dp(10);
         container.addView(input, lp);
         AlertDialog.Builder dialog = new AlertDialog.Builder(this)
-                .setTitle("皮皮智绘 API 密钥")
+                .setTitle("API 密钥设置")
                 .setView(container)
                 .setPositiveButton("保存", (d, w) -> {
                     int saved = service.saveCustomKeys(input.getText().toString());
@@ -220,7 +220,7 @@ public final class MainActivity extends Activity {
         if(!service.isConfigured()){
             new AlertDialog.Builder(this)
                     .setTitle("尚未配置生图密钥")
-                    .setMessage("请先设置皮皮智绘 API 密钥（支持多密钥轮询），或先预览内置示例作品。")
+                    .setMessage("请先设置生图 API 密钥（支持多密钥轮询），或先预览内置示例作品。")
                     .setPositiveButton("设置密钥", (d, w) -> editApiKeys())
                     .setNeutralButton("查看示例", (d, w) -> detail(""))
                     .setNegativeButton("返回", null)
