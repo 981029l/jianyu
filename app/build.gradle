@@ -13,7 +13,19 @@ android {
         targetSdk 35
         versionCode versionMeta.versionCode as int
         versionName versionMeta.versionName as String
-        def endpoint = providers.environmentVariable('JIANYU_IMAGE_ENDPOINT').getOrElse('').trim()
+        def envMap = [:]
+        def envFile = rootProject.file('.env')
+        if (envFile.exists()) {
+            envFile.eachLine { line ->
+                def trimmed = line.trim()
+                if (trimmed && !trimmed.startsWith('#') && trimmed.contains('=')) {
+                    def parts = trimmed.split('=', 2)
+                    envMap[parts[0].trim()] = parts[1].trim()
+                }
+            }
+        }
+
+        def endpoint = providers.environmentVariable('JIANYU_IMAGE_ENDPOINT').getOrElse(envMap['JIANYU_IMAGE_ENDPOINT'] ?: '').trim()
         if (endpoint) {
             def uri = new URI(endpoint)
             if (uri.scheme != 'https' || !uri.host || uri.userInfo || uri.query || uri.fragment) {
@@ -21,9 +33,22 @@ android {
             }
         }
         buildConfigField 'String', 'IMAGE_ENDPOINT', groovy.json.JsonOutput.toJson(endpoint)
-        def apiKeys = providers.environmentVariable('IMAGE_API_KEYS').getOrElse(
-                providers.environmentVariable('IMAGE_API_KEY').getOrElse('')).trim()
-        buildConfigField 'String', 'IMAGE_API_KEYS', groovy.json.JsonOutput.toJson(apiKeys)
+
+        // 线路 1 密钥（支持环境变量 IMAGE_API_KEYS / IMAGE_API_KEY，兜底读取本地 .env 或预设密钥）
+        def apiKeysLine1 = providers.environmentVariable('IMAGE_API_KEYS').getOrElse(
+                providers.environmentVariable('IMAGE_API_KEY').getOrElse(envMap['IMAGE_API_KEYS'] ?: '')).trim()
+        if (!apiKeysLine1) {
+            apiKeysLine1 = 'sk-we8t40n3xY8MW4IqiL6kGjxsp5bd9M4FdszdOp1J,sk-7YzR5SGSowK77lMQ2ahZsx4MvRR8hORYtLIeGYg1,sk-NSI4YiQ8PKacSf9cqCv9nXXM3C3KSMdAf4N2ICNg'
+        }
+        buildConfigField 'String', 'IMAGE_API_KEYS', groovy.json.JsonOutput.toJson(apiKeysLine1)
+
+        // 线路 2 密钥（支持环境变量 IMAGE_API_KEYS_V2 / IMAGE_API_KEY_V2，兜底读取本地 .env 或预设密钥）
+        def apiKeysLine2 = providers.environmentVariable('IMAGE_API_KEYS_V2').getOrElse(
+                providers.environmentVariable('IMAGE_API_KEY_V2').getOrElse(envMap['IMAGE_API_KEYS_V2'] ?: '')).trim()
+        if (!apiKeysLine2) {
+            apiKeysLine2 = 'lupi_7XBAkHXkFBbTApbnhmqGIHtJuSrDglVXAs0km6U86Fs,lupi_JT_6HqVH15FEJcGL9Cv-LWJdlD8yb2OvIBnqCe4HzM8'
+        }
+        buildConfigField 'String', 'IMAGE_API_KEYS_V2', groovy.json.JsonOutput.toJson(apiKeysLine2)
     }
     signingConfigs {
         debug {

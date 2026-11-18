@@ -206,7 +206,7 @@ def outcome(status, body, known_id=None):
     detail_text = extract_detail(body)
     if not 200 <= status < 300:
         messages = {400: '检查提示词、模型及参考图。', 422: '检查提示词、模型及参考图。',
-                    401: '请检查网关的皮皮智绘密钥。', 403: '请检查皮皮智绘账户权限。',
+                    401: '请检查网关的生图 API 密钥。', 403: '请检查生图服务账户权限。',
                     429: '请求过于频繁，请稍后再试。'}
         base = messages.get(status, '服务未返回作品，请核对任务记录。')
         return status if 400 <= status < 600 else 502, error_payload(info, base, detail_text)
@@ -218,7 +218,7 @@ def outcome(status, body, known_id=None):
             return 200, dict(info, image_url=url)
     state = str(body.get('status', '')).lower()
     if state in ('failed', 'error', 'cancelled', 'canceled') or result.get('refunded') or ('delivered_count' in result and result['delivered_count'] == 0 and state not in ('queued', 'pending', 'running', 'processing')):
-        return 410, error_payload(info, '任务未交付图片，请在皮皮智绘核对任务与积分记录。', detail_text)
+        return 410, error_payload(info, '任务未交付图片，请核对任务与额度记录。', detail_text)
     if task and state not in ('completed', 'done', 'succeeded', 'success'):
         return 202, info
     return 502, error_payload(info, '结果中缺少可下载的图片地址。', detail_text)
@@ -265,7 +265,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(400, {'error': str(exc)})
         pool = self.key_pool()
         if pool is None:
-            return self.reply(500, {'error': '网关未配置皮皮智绘密钥。'})
+            return self.reply(500, {'error': '网关未配置生图 API 密钥。'})
         try:
             if self.command == 'GET':
                 used_key = None
@@ -287,7 +287,7 @@ class Handler(BaseHTTPRequestHandler):
                 if status == 202 and result.get('task_id'):
                     pool.remember(result['task_id'], used_key)
         except (URLError, OSError, HTTPException):
-            status, result = 502, {'error': '与皮皮智绘的连接中断，请核对原任务后再发起生成。'}
+            status, result = 502, {'error': '生图服务连接中断，请核对原任务后再发起生成。'}
         self.reply(status, result)
 
     do_POST = do_GET = handle_api

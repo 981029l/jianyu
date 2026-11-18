@@ -18,16 +18,12 @@
 - **应用内更新与设置面板**：App 启动时静默检查更新，发现新版本时在创作页右上角「设置」齿轮按钮显示小蓝点提醒；点击齿轮可打开设置面板查看版本/手动检查更新、开关「安全浏览」（默认折叠敏感灵感预览）以及查看/清理图片与画廊缓存。优先通过 jsDelivr CDN / Raw GitHub 读取 `version.json`，并配备 GitHub Releases 302 探针与官方 API 兜底；下载 APK 支持官方直链与 `ghfast.top` 镜像自动回退，完成后通过 `FileProvider` 调起系统安装器覆盖安装。
 - **发布新版本**：修改仓库根目录 `version.json`（递增 `versionCode`、更新 `versionName`、`downloadUrl` 与 `releaseNotes`）并推送到 `main`，GitHub Actions 会自动编译、校验、发布 GitHub Release 并刷新 jsDelivr 缓存。
 
-## 连接皮皮智绘生图 API
+## 双线路生图配置
 
-接口依据为项目所有者提供的《皮皮智绘 · 生图 API 说明》（2026-10-25）。支持两种接入方式：
-
-1. **手机直连模式（推荐自用，无需服务器）**：未配置 `JIANYU_IMAGE_ENDPOINT` 时，Android 客户端直接请求 `https://img.pipiwangcom.com/api/v1`，并内置多密钥顺序轮询与任务归属保持。在 GitHub 仓库 **Settings → Secrets and variables → Actions → Secrets** 添加 `IMAGE_API_KEYS`（多个密钥用逗号或换行分隔），打包 APK 时自动内置，App 界面不提供密钥填写入口。
-2. **可选网关模式（适合对外分发）**：如需将密钥留在服务端，可部署项目内的 `gateway/server.py`（从环境变量或本地 `.env` 读取 `IMAGE_API_KEYS` / `IMAGE_API_KEY`），并在构建变量中设置 `JIANYU_IMAGE_ENDPOINT` 为你的 HTTPS 网关地址。
-
-在创作页输入 1–4000 字的提示词，选择 GPT 或 Grok，点击“生成图片”。请求向 `/api/v1/images/generations` 提交一张图的任务，GPT 使用 `image-1` 和 `auto`（1:1 映射为 `1024x1024`，竖图 3:4/9:16 映射为 `1024x1536`，横图 4:3/16:9 映射为 `1536x1024`），Grok 使用 `image-2` 和 `1k`（保持 1K 比例尺寸，并可在创作页开启“允许 NSFW”开关）。可选一张 4 MiB 以内的 PNG、JPEG 或 WebP 作为参考图，此时走 `/api/v1/images/edits`。返回的图片下载后保存到作品库。
-
-上游返回错误或任务失败时，会提取响应中的 `detail`（支持字符串、对象及校验列表）并展示在错误提示中。超时响应带有 `task_id` 时，客户端优先使用提交该任务的原密钥通过 `GET /api/v1/tasks/{task_id}` 取回原任务。任务仍在处理时，可在创作页点“继续获取上次作品”。若请求中断且没有取得任务编号，请在皮皮智绘核对任务记录，以免重复扣费。
+见屿客户端支持双线路一键切换：
+- **线路 1（经典稳定）**：支持 GPT / Grok 模型；
+- **线路 2（新版多模型）**：支持 GPT-2.5 系列模型及参考图图生图；
+- **密钥配置**：在 GitHub 仓库 **Settings → Secrets and variables → Actions → Secrets** 可分别配置 `IMAGE_API_KEYS`（线路 1）和 `IMAGE_API_KEYS_V2`（线路 2），云端打包自动注入，App 内无感切换。
 
 ## 官方资料
 

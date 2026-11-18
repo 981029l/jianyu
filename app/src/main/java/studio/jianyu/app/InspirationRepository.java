@@ -40,6 +40,7 @@ final class InspirationRepository {
         final String prompt;
         final String thumbUrl;
         final String imageUrl;
+        final String refUrl;
         final String major;
         final String rawMajor;
         final String category;
@@ -53,12 +54,19 @@ final class InspirationRepository {
         Item(String source, String id, String title, String prompt, String thumbUrl, String imageUrl,
              String major, String rawMajor, String category, String model, String ratio,
              boolean nsfw, String author, int width, int height) {
+            this(source, id, title, prompt, thumbUrl, imageUrl, "", major, rawMajor, category, model, ratio, nsfw, author, width, height);
+        }
+
+        Item(String source, String id, String title, String prompt, String thumbUrl, String imageUrl, String refUrl,
+             String major, String rawMajor, String category, String model, String ratio,
+             boolean nsfw, String author, int width, int height) {
             this.source = source;
             this.id = id;
             this.title = title;
             this.prompt = prompt;
             this.thumbUrl = thumbUrl;
             this.imageUrl = imageUrl;
+            this.refUrl = refUrl == null ? "" : refUrl;
             this.major = major;
             this.rawMajor = rawMajor;
             this.category = category;
@@ -93,6 +101,7 @@ final class InspirationRepository {
                 o.put("prompt", prompt);
                 o.put("thumbUrl", thumbUrl);
                 o.put("imageUrl", imageUrl);
+                o.put("refUrl", refUrl);
                 o.put("major", major);
                 o.put("rawMajor", rawMajor);
                 o.put("category", category);
@@ -115,6 +124,7 @@ final class InspirationRepository {
                     o.optString("prompt", ""),
                     o.optString("thumbUrl", ""),
                     o.optString("imageUrl", ""),
+                    o.optString("refUrl", ""),
                     o.optString("major", ""),
                     o.optString("rawMajor", ""),
                     o.optString("category", ""),
@@ -228,89 +238,121 @@ final class InspirationRepository {
 
     static GalleryData loadGallery(Context context, boolean forceRefresh) throws IOException {
         if (!forceRefresh && galleryCache != null) return galleryCache;
-        File cacheFile = new File(context.getCacheDir(), "prompt-gallery-20260919-r10.json");
-        if (forceRefresh || !cacheFile.isFile() || cacheFile.length() < 1024) {
-            File tmp = File.createTempFile("catalog-", ".tmp", context.getCacheDir());
-            try {
-                HttpsURLConnection conn = open(GALLERY_CATALOG_URL, 30000);
-                try {
-                    conn.setRequestProperty("Accept", "application/json");
-                    conn.setRequestProperty("Accept-Encoding", "gzip");
-                    int status = conn.getResponseCode();
-                    if (status < 200 || status >= 300) throw new IOException("提示词画廊加载失败（HTTP " + status + "）");
-                    InputStream raw = conn.getInputStream();
-                    if ("gzip".equalsIgnoreCase(conn.getContentEncoding())) raw = new GZIPInputStream(raw);
-                    try (InputStream in = raw; OutputStream out = new FileOutputStream(tmp)) {
-                        ImageService.copy(in, out, CATALOG_LIMIT, "提示词画廊数据过大。");
-                    }
-                } finally { conn.disconnect(); }
-                if (cacheFile.exists()) cacheFile.delete();
-                if (!tmp.renameTo(cacheFile)) throw new IOException("提示词画廊缓存失败。");
-            } finally {
-                if (tmp.exists()) tmp.delete();
-            }
-        }
-        GalleryData parsed = parseGalleryStream(cacheFile);
-        galleryCache = parsed;
-        return parsed;
-    }
 
-    private static GalleryData parseGalleryStream(File file) throws IOException {
-        List<Item> items = new ArrayList<>(5600);
+        List<Item> items = new ArrayList<>(7500);
         Map<String, Integer> majorCounts = new LinkedHashMap<>();
-        try (JsonReader reader = new JsonReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
-            reader.beginArray();
-            while (reader.hasNext()) {
-                String id = "", title = "", rawMajor = "", category = "", prompt = "", image = "", thumb = "";
-                int width = 0, height = 0;
-                reader.beginObject();
-                while (reader.hasNext()) {
-                    String name = reader.nextName();
-                    if (reader.peek() == JsonToken.NULL) {
-                        reader.nextNull();
-                        continue;
-                    }
-                    switch (name) {
-                        case "id":
-                            id = reader.peek() == JsonToken.NUMBER ? String.valueOf(reader.nextLong()) : reader.nextString().trim();
-                            break;
-                        case "title": title = reader.nextString().trim(); break;
-                        case "major": rawMajor = reader.nextString().trim(); break;
-                        case "category": category = reader.nextString().trim(); break;
-                        case "prompt": prompt = reader.nextString().trim(); break;
-                        case "image": image = reader.nextString().trim(); break;
-                        case "thumb": thumb = reader.nextString().trim(); break;
-                        case "width":
-                            if (reader.peek() == JsonToken.NUMBER) width = (int) Math.round(reader.nextDouble());
-                            else reader.skipValue();
-                            break;
-                        case "height":
-                            if (reader.peek() == JsonToken.NUMBER) height = (int) Math.round(reader.nextDouble());
-                            else reader.skipValue();
-                            break;
-                        default: reader.skipValue(); break;
-                    }
+        Set<String> seenIds = new HashSet<>(7500);
+
+        // 1. 优先加载本地内置 1,740 条优质提示词库（零网络秒开，确保离线与弱网环境下灵感画廊始终秒级可用）
+        try (InputStream in = context.getAssets().open("prompts_addon.json")) {
+            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, seenIds, true);
+        } catch (Exception ignored) { }
+
+        // 2. 尝试从本地缓存或远程下载 5,400+ 条在线画廊
+        File cacheFile = new File(context.getCacheDir(), "prompt-gallery-20260919-r10.json");
+        try {
+            if (forceRefresh || !cacheFile.isFile() || cacheFile.length() < 1024) {
+                File tmp = File.createTempFile("catalog-", ".tmp", context.getCacheDir());
+                try {
+                    HttpsURLConnection conn = open(GALLERY_CATALOG_URL, 30000);
+                    try {
+                        conn.setRequestProperty("Accept", "application/json");
+                        conn.setRequestProperty("Accept-Encoding", "gzip");
+                        int status = conn.getResponseCode();
+                        if (status >= 200 && status < 300) {
+                            InputStream raw = conn.getInputStream();
+                            if ("gzip".equalsIgnoreCase(conn.getContentEncoding())) raw = new GZIPInputStream(raw);
+                            try (InputStream in = raw; OutputStream out = new FileOutputStream(tmp)) {
+                                ImageService.copy(in, out, CATALOG_LIMIT, "提示词画廊数据过大。");
+                            }
+                            if (cacheFile.exists()) cacheFile.delete();
+                            tmp.renameTo(cacheFile);
+                        }
+                    } finally { conn.disconnect(); }
+                } finally {
+                    if (tmp.exists()) tmp.delete();
                 }
-                reader.endObject();
-                if (prompt.isEmpty() || (thumb.isEmpty() && image.isEmpty())) continue;
-                String cleanMajor = sanitizeMajor(rawMajor);
-                String fullThumb = thumb.startsWith("https://") ? thumb : GALLERY_THUMB_BASE + (thumb.isEmpty() ? image : thumb);
-                String fullImage = image.startsWith("https://") ? image : GALLERY_IMAGE_BASE + (image.isEmpty() ? thumb : image);
-                String ratio = inferRatio(width, height);
-                boolean isSensitive = rawMajor.contains("大凶") || category.contains("大凶") || category.contains("诱惑");
-                items.add(new Item("gallery", id, title, prompt, fullThumb, fullImage,
-                        cleanMajor, rawMajor, category, "", ratio, isSensitive, "", width, height));
-                Integer count = majorCounts.get(cleanMajor);
-                majorCounts.put(cleanMajor, count == null ? 1 : count + 1);
             }
-            reader.endArray();
+
+            if (cacheFile.isFile() && cacheFile.length() >= 1024) {
+                try (InputStream in = new FileInputStream(cacheFile)) {
+                    parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, seenIds, false);
+                }
+            }
+        } catch (Exception e) {
+            // 如果在线画廊下载失败，但已成功载入内置词库，则优雅降级展示已有词库
+            if (items.isEmpty()) throw new IOException("提示词画廊加载失败，请检查网络。");
         }
+
+        if (items.isEmpty()) throw new IOException("暂无可用的提示词画廊数据。");
+
         List<Map.Entry<String, Integer>> sorted = new ArrayList<>(majorCounts.entrySet());
         sorted.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
         List<String> majors = new ArrayList<>();
         majors.add("全部");
         for (Map.Entry<String, Integer> entry : sorted) majors.add(entry.getKey());
-        return new GalleryData(items, majors);
+
+        GalleryData parsed = new GalleryData(items, majors);
+        galleryCache = parsed;
+        return parsed;
+    }
+
+    private static void parseItemsFromReader(JsonReader reader, List<Item> items,
+                                             Map<String, Integer> majorCounts,
+                                             Set<String> seenIds,
+                                             boolean isAddon) throws IOException {
+        reader.beginArray();
+        while (reader.hasNext()) {
+            String id = "", title = "", rawMajor = "", category = "", prompt = "", image = "", thumb = "", ref = "", author = "";
+            int width = 0, height = 0;
+            reader.beginObject();
+            while (reader.hasNext()) {
+                String name = reader.nextName();
+                if (reader.peek() == JsonToken.NULL) {
+                    reader.nextNull();
+                    continue;
+                }
+                switch (name) {
+                    case "id":
+                        id = reader.peek() == JsonToken.NUMBER ? String.valueOf(reader.nextLong()) : reader.nextString().trim();
+                        break;
+                    case "title": title = reader.nextString().trim(); break;
+                    case "major": rawMajor = reader.nextString().trim(); break;
+                    case "category": category = reader.nextString().trim(); break;
+                    case "prompt": prompt = reader.nextString().trim(); break;
+                    case "image": image = reader.nextString().trim(); break;
+                    case "thumb": thumb = reader.nextString().trim(); break;
+                    case "ref": ref = reader.nextString().trim(); break;
+                    case "author": author = reader.nextString().trim(); break;
+                    case "width":
+                        if (reader.peek() == JsonToken.NUMBER) width = (int) Math.round(reader.nextDouble());
+                        else reader.skipValue();
+                        break;
+                    case "height":
+                        if (reader.peek() == JsonToken.NUMBER) height = (int) Math.round(reader.nextDouble());
+                        else reader.skipValue();
+                        break;
+                    default: reader.skipValue(); break;
+                }
+            }
+            reader.endObject();
+            if (prompt.isEmpty() || (thumb.isEmpty() && image.isEmpty())) continue;
+            String uniqueKey = (isAddon ? "addon:" : "gallery:") + id;
+            if (seenIds != null && !seenIds.add(uniqueKey)) continue;
+
+            String cleanMajor = isAddon ? (rawMajor.isEmpty() ? "综合精选" : rawMajor) : sanitizeMajor(rawMajor);
+            String fullThumb = thumb.startsWith("http://") || thumb.startsWith("https://") ? thumb : GALLERY_THUMB_BASE + (thumb.isEmpty() ? image : thumb);
+            String fullImage = image.startsWith("http://") || image.startsWith("https://") ? image : GALLERY_IMAGE_BASE + (image.isEmpty() ? thumb : image);
+            String fullRef = ref.startsWith("http://") || ref.startsWith("https://") ? ref : "";
+            String ratio = inferRatio(width, height);
+            boolean isSensitive = rawMajor.contains("大凶") || category.contains("大凶") || category.contains("诱惑") || "风格人像".equals(cleanMajor);
+
+            items.add(new Item(isAddon ? "addon" : "gallery", id, title, prompt, fullThumb, fullImage, fullRef,
+                    cleanMajor, rawMajor, category, "", ratio, isSensitive, author, width, height));
+            Integer count = majorCounts.get(cleanMajor);
+            majorCounts.put(cleanMajor, count == null ? 1 : count + 1);
+        }
+        reader.endArray();
     }
 
     static List<Item> filterGallery(GalleryData data, String major, String query) {

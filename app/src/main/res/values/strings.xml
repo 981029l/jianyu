@@ -1,6 +1,54 @@
 <resources>
     <string name="app_name">见屿</string>
-    <string-array name="models"><item>GPT</item><item>Grok</item></string-array>
-    <string-array name="wire_models"><item>Image 1</item><item>Image 2</item></string-array>
-    <string-array name="ratios"><item>1:1</item><item>3:4</item><item>4:3</item><item>9:16</item><item>16:9</item></string-array>
+
+    <string-array name="routes">
+        <item>线路 1</item>
+        <item>线路 2</item>
+    </string-array>
+
+    <!-- 线路 1（经典稳定 · 支持 GPT / Grok） -->
+    <string-array name="models_line1">
+        <item>GPT</item>
+        <item>Grok</item>
+    </string-array>
+    <string-array name="wire_models_line1">
+        <item>image-1</item>
+        <item>image-2</item>
+    </string-array>
+
+    <!-- 线路 2（新版多模型 · 支持 GPT-2.5 系列） -->
+    <string-array name="models_line2">
+        <item>GPT-2.5</item>
+        <item>GPT-2.5 Flare</item>
+        <item>GPT-2.5 Sunburst</item>
+        <item>GPT-2</item>
+    </string-array>
+    <string-array name="wire_models_line2">
+        <item>gpt-image-2.5</item>
+        <item>gpt-image-2.5-flare</item>
+        <item>gpt-image-2.5-sunburst</item>
+        <item>gpt-image-2</item>
+    </string-array>
+
+    <!-- 兼容旧逻辑的兜底定义 -->
+    <string-array name="models">
+        <item>GPT-2.5</item>
+        <item>GPT-2.5 Flare</item>
+        <item>GPT-2.5 Sunburst</item>
+        <item>GPT-2</item>
+    </string-array>
+    <string-array name="wire_models">
+        <item>gpt-image-2.5</item>
+        <item>gpt-image-2.5-flare</item>
+        <item>gpt-image-2.5-sunburst</item>
+        <item>gpt-image-2</item>
+    </string-array>
+
+    <string-array name="ratios">
+        <item>1:1</item>
+        <item>3:4</item>
+        <item>4:3</item>
+        <item>9:16</item>
+        <item>16:9</item>
+    </string-array>
 </resources>

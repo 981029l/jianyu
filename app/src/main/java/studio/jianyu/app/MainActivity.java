@@ -125,7 +125,10 @@ public final class MainActivity extends Activity {
     private int activeTab = 0; // 0: 创作, 1: 灵感, 2: 作品库
     private boolean imeVisible = false;
     private String draft = "", current = "";
-    private int model, ratio;
+    private int selectedRoute = 0; // 0: 线路 1, 1: 线路 2
+    private int modelLine1 = 0; // 0: GPT, 1: Grok
+    private int modelLine2 = 0; // 0: GPT-2.5, 1: GPT-2.5 Flare, 2: GPT-2.5 Sunburst, 3: GPT-2
+    private int ratio;
     private boolean nsfw;
     private boolean safeBrowse = true;
     private int libraryFilter = 0; // 0: 全部, 1: GPT, 2: Grok
@@ -137,7 +140,7 @@ public final class MainActivity extends Activity {
     private String galleryQuery = "";
     private int galleryVisibleCount = GALLERY_PAGE_SIZE;
 
-    private String[] models, wireModels, ratios;
+    private String[] routes, modelsLine1, wireModelsLine1, modelsLine2, wireModelsLine2, ratios;
     private Uri reference;
     private ImageService service;
     private SharedPreferences prefs;
@@ -169,13 +172,23 @@ public final class MainActivity extends Activity {
         service = new ImageService(this);
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         safeBrowse = prefs.getBoolean(KEY_SAFE_BROWSE, true);
-        models = getResources().getStringArray(R.array.models);
-        wireModels = getResources().getStringArray(R.array.wire_models);
+
+        routes = getResources().getStringArray(R.array.routes);
+        modelsLine1 = getResources().getStringArray(R.array.models_line1);
+        wireModelsLine1 = getResources().getStringArray(R.array.wire_models_line1);
+        modelsLine2 = getResources().getStringArray(R.array.models_line2);
+        wireModelsLine2 = getResources().getStringArray(R.array.wire_models_line2);
         ratios = getResources().getStringArray(R.array.ratios);
+
+        selectedRoute = prefs.getInt("selected_route", 0);
+        modelLine1 = prefs.getInt("model_line1", 0);
+        modelLine2 = prefs.getInt("model_line2", 0);
 
         if (state != null) {
             draft = state.getString("draft", "");
-            model = state.getInt("model", 0);
+            selectedRoute = state.getInt("selectedRoute", selectedRoute);
+            modelLine1 = state.getInt("modelLine1", modelLine1);
+            modelLine2 = state.getInt("modelLine2", modelLine2);
             ratio = state.getInt("ratio", 0);
             nsfw = state.getBoolean("nsfw", false);
             current = state.getString("current", "");
@@ -195,6 +208,10 @@ public final class MainActivity extends Activity {
         refreshLibraryContent();
 
         if (busy) startGenTimer();
+
+        if (state == null) {
+            playLaunchAnimation();
+        }
 
         if (!autoCheckedUpdate) {
             autoCheckedUpdate = true;
@@ -230,7 +247,9 @@ public final class MainActivity extends Activity {
         super.onSaveInstanceState(state);
         if (promptInput != null) draft = promptInput.getText().toString();
         state.putString("draft", draft);
-        state.putInt("model", model);
+        state.putInt("selectedRoute", selectedRoute);
+        state.putInt("modelLine1", modelLine1);
+        state.putInt("modelLine2", modelLine2);
         state.putInt("ratio", ratio);
         state.putBoolean("nsfw", nsfw);
         state.putInt("activeTab", activeTab);
@@ -243,8 +262,136 @@ public final class MainActivity extends Activity {
         state.putString("current", current);
     }
 
+    private String[] activeModelDisplayList() {
+        return selectedRoute == 0 ? modelsLine1 : modelsLine2;
+    }
+
+    private String[] activeWireModelList() {
+        return selectedRoute == 0 ? wireModelsLine1 : wireModelsLine2;
+    }
+
+    private int activeModelIndex() {
+        return selectedRoute == 0 ? modelLine1 : modelLine2;
+    }
+
+    private void setActiveModelIndex(int idx) {
+        if (selectedRoute == 0) {
+            modelLine1 = Math.max(0, Math.min(idx, modelsLine1.length - 1));
+            prefs.edit().putInt("model_line1", modelLine1).apply();
+        } else {
+            modelLine2 = Math.max(0, Math.min(idx, modelsLine2.length - 1));
+            prefs.edit().putInt("model_line2", modelLine2).apply();
+        }
+    }
+
+    private String activeModelDisplayName() {
+        String[] list = activeModelDisplayList();
+        int idx = activeModelIndex();
+        return idx >= 0 && idx < list.length ? list[idx] : "";
+    }
+
+    private String activeWireModelName() {
+        String[] list = activeWireModelList();
+        int idx = activeModelIndex();
+        return idx >= 0 && idx < list.length ? list[idx] : "";
+    }
+
     private int dp(float v) { return UiKit.dp(this, v); }
-    private boolean isGrok() { return "Image 2".equals(wireModels[model]); }
+    private boolean isGrok() { return selectedRoute == 0 && modelLine1 == 1; }
+
+    /** 专属极简 Apple 风格开屏启动动画（冷启动时 0.45 秒内平滑展开，无黑屏无广告） */
+    private void playLaunchAnimation() {
+        FrameLayout splash = new FrameLayout(this);
+        splash.setBackground(UiKit.auroraCanvasBg(this));
+        splash.setClickable(true);
+        splash.setFocusable(true);
+
+        LinearLayout brandCenter = new LinearLayout(this);
+        brandCenter.setOrientation(LinearLayout.VERTICAL);
+        brandCenter.setGravity(Gravity.CENTER);
+
+        // 极光晨光光环 + 灯塔 Logo
+        FrameLayout halo = new FrameLayout(this);
+        GradientDrawable glow = new GradientDrawable();
+        glow.setGradientType(GradientDrawable.RADIAL_GRADIENT);
+        glow.setGradientCenter(0.5f, 0.5f);
+        glow.setGradientRadius(dp(70));
+        glow.setColors(new int[]{0x456AA8FF, 0x00FFFFFF});
+        halo.setBackground(glow);
+        halo.setPadding(dp(10), dp(10), dp(10), dp(10));
+
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        halo.addView(logo, new FrameLayout.LayoutParams(dp(72), dp(72), Gravity.CENTER));
+        brandCenter.addView(halo, new LinearLayout.LayoutParams(dp(92), dp(92)));
+
+        TextView title = UiKit.text(this, "见屿", 25, UiKit.INK, true);
+        title.setLetterSpacing(0.14f);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
+        tlp.topMargin = dp(14);
+        brandCenter.addView(title, tlp);
+
+        TextView subtitle = UiKit.text(this, "J I A N Y U", 10.5f, UiKit.BLUE, true);
+        subtitle.setLetterSpacing(0.26f);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+        slp.topMargin = dp(4);
+        brandCenter.addView(subtitle, slp);
+
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2);
+        clp.gravity = Gravity.CENTER;
+        splash.addView(brandCenter, clp);
+
+        root.addView(splash, new FrameLayout.LayoutParams(-1, -1));
+
+        // 初始状态配置
+        brandCenter.setScaleX(0.80f);
+        brandCenter.setScaleY(0.80f);
+        brandCenter.setAlpha(0f);
+
+        tabHost.setAlpha(0f);
+        tabHost.setScaleX(0.965f);
+        tabHost.setScaleY(0.965f);
+        tabHost.setTranslationY(dp(18));
+
+        floatingNav.setAlpha(0f);
+        floatingNav.setTranslationY(dp(70));
+
+        // Phase 1 (0 ~ 240ms): 极光灯塔微标伴随晨光微亮呼吸展开
+        brandCenter.animate()
+                .scaleX(1f)
+                .scaleY(1f)
+                .alpha(1f)
+                .setDuration(240)
+                .setInterpolator(MotionKit.APPLE_SPRING)
+                .withEndAction(() -> {
+                    // Phase 2 (240 ~ 480ms): 启动蒙层轻盈溶解，主画布展开并浮现底栏
+                    splash.animate()
+                            .alpha(0f)
+                            .scaleX(1.05f)
+                            .scaleY(1.05f)
+                            .setDuration(240)
+                            .setInterpolator(MotionKit.APPLE_EASE_OUT)
+                            .withEndAction(() -> root.removeView(splash))
+                            .start();
+
+                    tabHost.animate()
+                            .alpha(1f)
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .translationY(0f)
+                            .setDuration(280)
+                            .setInterpolator(MotionKit.APPLE_EASE_OUT)
+                            .start();
+
+                    floatingNav.animate()
+                            .alpha(1f)
+                            .translationY(0f)
+                            .setDuration(300)
+                            .setInterpolator(MotionKit.APPLE_SPRING)
+                            .start();
+                })
+                .start();
+    }
 
     // ==================== 根壳与持久化 3-Tab ====================
 
@@ -699,8 +846,9 @@ public final class MainActivity extends Activity {
         }
         // 更新参数胶囊文案
         if (paramSummaryText != null) {
-            String summary = models[model] + "  ·  " + ratios[ratio];
-            if (isGrok() && nsfw) summary += "  ·  NSFW";
+            String routeName = selectedRoute == 0 ? "线路 1" : "线路 2";
+            String summary = routeName + " · " + activeModelDisplayName() + " · " + ratios[ratio];
+            if (isGrok() && nsfw) summary += " · NSFW";
             paramSummaryText.setText(summary);
         }
         // 同步草稿文本框（如从灵感/作品详情回填时）
@@ -922,17 +1070,69 @@ public final class MainActivity extends Activity {
             @Override public void run() {
                 contentSlot.removeAllViews();
 
-                contentSlot.addView(UiKit.text(MainActivity.this, "模型引擎", 12.5f, UiKit.MUTED, true));
-                LinearLayout seg = UiKit.segmentedControl(MainActivity.this, models, model, idx -> {
-                    if (model != idx) {
-                        model = idx;
+                // 1. 服务线路选择
+                contentSlot.addView(UiKit.text(MainActivity.this, "服务线路", 12.5f, UiKit.MUTED, true));
+                LinearLayout routeSeg = UiKit.segmentedControl(MainActivity.this, routes, selectedRoute, idx -> {
+                    if (selectedRoute != idx) {
+                        selectedRoute = idx;
+                        prefs.edit().putInt("selected_route", selectedRoute).apply();
                         refreshHomeDynamic();
                         run();
                     }
                 });
-                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
-                slp.topMargin = dp(8);
-                contentSlot.addView(seg, slp);
+                LinearLayout.LayoutParams rslp = new LinearLayout.LayoutParams(-1, -2);
+                rslp.topMargin = dp(8);
+                contentSlot.addView(routeSeg, rslp);
+
+                TextView routeHint = UiKit.text(MainActivity.this,
+                        selectedRoute == 0 ? "经典线路 · 支持 GPT / Grok 稳定生成" : "新版线路 · 支持 GPT-2.5 多模型与图生图",
+                        11f, UiKit.MUTED, false);
+                LinearLayout.LayoutParams rhlp = new LinearLayout.LayoutParams(-2, -2);
+                rhlp.topMargin = dp(4);
+                rhlp.bottomMargin = dp(12);
+                contentSlot.addView(routeHint, rhlp);
+
+                // 2. 模型引擎选择
+                contentSlot.addView(UiKit.text(MainActivity.this, "模型引擎", 12.5f, UiKit.MUTED, true));
+                if (selectedRoute == 0) {
+                    LinearLayout seg1 = UiKit.segmentedControl(MainActivity.this, modelsLine1, modelLine1, idx -> {
+                        if (modelLine1 != idx) {
+                            modelLine1 = idx;
+                            prefs.edit().putInt("model_line1", modelLine1).apply();
+                            refreshHomeDynamic();
+                            run();
+                        }
+                    });
+                    LinearLayout.LayoutParams slp1 = new LinearLayout.LayoutParams(-1, -2);
+                    slp1.topMargin = dp(8);
+                    contentSlot.addView(seg1, slp1);
+                } else {
+                    String[] row1 = new String[]{modelsLine2[0], modelsLine2[1]};
+                    String[] row2 = new String[]{modelsLine2[2], modelsLine2[3]};
+                    LinearLayout seg1 = UiKit.segmentedControl(MainActivity.this, row1, modelLine2 <= 1 ? modelLine2 : -1, idx -> {
+                        if (modelLine2 != idx) {
+                            modelLine2 = idx;
+                            prefs.edit().putInt("model_line2", modelLine2).apply();
+                            refreshHomeDynamic();
+                            run();
+                        }
+                    });
+                    LinearLayout.LayoutParams slp1 = new LinearLayout.LayoutParams(-1, -2);
+                    slp1.topMargin = dp(8);
+                    contentSlot.addView(seg1, slp1);
+
+                    LinearLayout seg2 = UiKit.segmentedControl(MainActivity.this, row2, modelLine2 >= 2 ? (modelLine2 - 2) : -1, idx -> {
+                        if (modelLine2 != (idx + 2)) {
+                            modelLine2 = idx + 2;
+                            prefs.edit().putInt("model_line2", modelLine2).apply();
+                            refreshHomeDynamic();
+                            run();
+                        }
+                    });
+                    LinearLayout.LayoutParams slp2 = new LinearLayout.LayoutParams(-1, -2);
+                    slp2.topMargin = dp(6);
+                    contentSlot.addView(seg2, slp2);
+                }
 
                 TextView rTitle = UiKit.text(MainActivity.this, "画面比例", 12.5f, UiKit.MUTED, true);
                 LinearLayout.LayoutParams rtlp = new LinearLayout.LayoutParams(-2, -2);
@@ -975,7 +1175,7 @@ public final class MainActivity extends Activity {
                     LinearLayout texts = new LinearLayout(MainActivity.this);
                     texts.setOrientation(LinearLayout.VERTICAL);
                     texts.addView(UiKit.text(MainActivity.this, "允许 NSFW", 13.5f, UiKit.INK, true));
-                    texts.addView(UiKit.text(MainActivity.this, "仅 Grok 支持 · 默认关闭", 11, UiKit.MUTED, false));
+                    texts.addView(UiKit.text(MainActivity.this, "仅线路 1 Grok 模型支持 · 默认关闭", 11, UiKit.MUTED, false));
                     LinearLayout.LayoutParams txlp = new LinearLayout.LayoutParams(0, -2, 1);
                     txlp.leftMargin = dp(10);
                     nsfwRow.addView(texts, txlp);
@@ -1797,7 +1997,7 @@ public final class MainActivity extends Activity {
             tags.setOrientation(LinearLayout.HORIZONTAL);
             LinearLayout.LayoutParams tagLp = new LinearLayout.LayoutParams(-2, -2);
             tagLp.topMargin = dp(10);
-            String m = !activeModel.isEmpty() ? activeModel : models[model];
+            String m = !activeModel.isEmpty() ? activeModel : activeModelDisplayName();
             String r = !activeRatio.isEmpty() ? activeRatio : ratios[ratio];
             tags.addView(UiKit.softBadge(this, m, UiKit.BLUE_SOFT, UiKit.BLUE));
             TextView rBadge = UiKit.softBadge(this, r, UiKit.SOFT, UiKit.MUTED);
@@ -2116,7 +2316,9 @@ public final class MainActivity extends Activity {
 
         LinearLayout subActions = new LinearLayout(this);
         subActions.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout asRef = UiKit.glassButton(this, R.drawable.ic_image_plus, "设为参考图", UiKit.GLASS_STRONG, UiKit.BLUE, () -> useRemoteAsReference(item));
+        boolean hasSpecificRef = item.refUrl != null && !item.refUrl.isEmpty();
+        String refLabel = hasSpecificRef ? "设为原配参考图" : "设为参考图";
+        LinearLayout asRef = UiKit.glassButton(this, R.drawable.ic_image_plus, refLabel, UiKit.GLASS_STRONG, UiKit.BLUE, () -> useRemoteAsReference(item));
         LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(48), 1);
         lp1.rightMargin = dp(6);
         subActions.addView(asRef, lp1);
@@ -2277,11 +2479,8 @@ public final class MainActivity extends Activity {
 
     private void applyInspirationToHome(InspirationRepository.Item item) {
         draft = item.prompt;
-        if ("Grok".equals(item.model)) {
-            setModelByName("Grok");
-            nsfw = item.nsfw;
-        } else if ("GPT".equals(item.model)) {
-            setModelByName("GPT");
+        if (item.model != null && !item.model.isEmpty()) {
+            setModelByName(item.model);
         }
         setRatioByName(item.ratio);
         reference = null;
@@ -2294,13 +2493,15 @@ public final class MainActivity extends Activity {
         Toast.makeText(this, "正在准备参考图…", Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             try {
-                Uri cached = service.cacheRemoteReference(item.imageUrl);
+                String target = (item.refUrl != null && !item.refUrl.isEmpty()) ? item.refUrl : item.imageUrl;
+                Uri cached = service.cacheRemoteReference(target);
                 uiHandler.post(() -> {
                     MainActivity act = visible;
                     if (act == null || act.isFinishing() || act.isDestroyed()) return;
                     act.reference = cached;
                     act.setRatioByName(item.ratio);
-                    Toast.makeText(act, "已设为参考图，可输入修改描述", Toast.LENGTH_SHORT).show();
+                    String tip = (item.refUrl != null && !item.refUrl.isEmpty()) ? "已载入原配参考图，可输入修改描述" : "已设为参考图，可输入修改描述";
+                    Toast.makeText(act, tip, Toast.LENGTH_SHORT).show();
                     act.clearOverlays();
                     act.switchTab(0);
                 });
@@ -2553,12 +2754,12 @@ public final class MainActivity extends Activity {
             openLoadingOverlay();
             return;
         }
-        if (!service.isConfigured()) {
+        if (!service.isLineConfigured(activeWireModelName())) {
+            String lineName = selectedRoute == 0 ? "线路 1" : "线路 2";
             new AlertDialog.Builder(this)
-                    .setTitle("生图服务尚未连接")
-                    .setMessage("当前可预览示例作品。应用接入服务后即可用自己的提示词生成图片。")
-                    .setPositiveButton("查看示例", (d, w) -> openDetailOverlay(""))
-                    .setNegativeButton("返回", null)
+                    .setTitle(lineName + " 尚未配置密钥")
+                    .setMessage("当前" + lineName + "尚未配置生图密钥。您可以切换至另一条线路体验，或在环境配置中添加密钥。")
+                    .setPositiveButton("我知道了", null)
                     .show();
             return;
         }
@@ -2572,10 +2773,10 @@ public final class MainActivity extends Activity {
             return;
         }
         activePrompt = input;
-        activeModel = models[model];
+        activeModel = activeModelDisplayName();
         activeRatio = ratios[ratio];
         activeHasRef = reference != null;
-        String wireModel = wireModels[model];
+        String wireModel = activeWireModelName();
         final long seq = ++activeGenSeq;
         busy = true;
         genStartMillis = System.currentTimeMillis();
@@ -2655,9 +2856,48 @@ public final class MainActivity extends Activity {
     }
 
     private void setModelByName(String name) {
-        for (int i = 0; i < models.length; i++) {
-            if (models[i].equalsIgnoreCase(name)) { model = i; return; }
+        if (name == null || name.isEmpty()) return;
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (lower.contains("flare")) {
+            selectedRoute = 1;
+            modelLine2 = 1;
+        } else if (lower.contains("sunburst")) {
+            selectedRoute = 1;
+            modelLine2 = 2;
+        } else if (lower.equals("gpt-2") || lower.equals("gpt-image-2")) {
+            selectedRoute = 1;
+            modelLine2 = 3;
+        } else if (lower.contains("2.5") || lower.contains("gpt-image-2.5")) {
+            selectedRoute = 1;
+            modelLine2 = 0;
+        } else if (lower.contains("grok") || "image-2".equals(lower)) {
+            selectedRoute = 0;
+            modelLine1 = 1;
+        } else if ("image-1".equals(lower) || "gpt".equals(lower)) {
+            selectedRoute = 0;
+            modelLine1 = 0;
+        } else {
+            for (int i = 0; i < modelsLine2.length; i++) {
+                if (modelsLine2[i].equalsIgnoreCase(name) || wireModelsLine2[i].equalsIgnoreCase(name)) {
+                    selectedRoute = 1;
+                    modelLine2 = i;
+                    prefs.edit().putInt("selected_route", selectedRoute).putInt("model_line2", modelLine2).apply();
+                    return;
+                }
+            }
+            for (int i = 0; i < modelsLine1.length; i++) {
+                if (modelsLine1[i].equalsIgnoreCase(name) || wireModelsLine1[i].equalsIgnoreCase(name)) {
+                    selectedRoute = 0;
+                    modelLine1 = i;
+                    prefs.edit().putInt("selected_route", selectedRoute).putInt("model_line1", modelLine1).apply();
+                    return;
+                }
+            }
+            return;
         }
+        prefs.edit().putInt("selected_route", selectedRoute)
+                .putInt("model_line1", modelLine1)
+                .putInt("model_line2", modelLine2).apply();
     }
 
     private void setRatioByName(String name) {

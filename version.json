@@ -1,6 +1,6 @@
 {
-  "versionCode": 5,
-  "versionName": "0.5.0",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.5.0/Jianyu-v0.5.0.apk",
-  "releaseNotes": "1. 全局动效系统升级：所有按钮/图标/卡片增加苹果级弹性按压回弹与触觉反馈；Tab 切换增加柔和上浮淡入与图标弹跃；底部面板与二级页增加弹性转场与平滑退出；输入报错增加震感轻晃。\n2. 输入框滚动条与手势修复：解决嵌套在 ScrollView 中滚动条缺失与手势被抢的问题，采用专属 XML 模板声明与细致圆角滑块（#7A4F6B94），加入父级手势拦截规避，长文本滚动丝滑可控。\n3. 画布双击平滑缩放：图片全屏查看器双击放大/还原升级为 ValueAnimator 平滑过渡动画，杜绝突兀闪变。"
+  "versionCode": 6,
+  "versionName": "0.6.0",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.6.0/Jianyu-v0.6.0.apk",
+  "releaseNotes": "1. 线路 1 与 线路 2 双线路无缝切换：保留经典线路 1（GPT / Grok），新增线路 2（GPT-2.5 / GPT-2.5 Flare / GPT-2.5 Sunburst / GPT-2 多模型与图生图支持）。\n2. 离线画廊与 1,740 组精选提示词库：内置丰富提示词灵感画廊，秒速浏览与一键填入创作。\n3. 多源独立密钥体系：支持 GitHub Secrets 独立注入各线路密钥，安全稳定。"
 }

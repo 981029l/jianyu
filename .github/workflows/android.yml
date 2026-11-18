@@ -35,6 +35,7 @@ jobs:
         env:
           JIANYU_IMAGE_ENDPOINT: ${{ vars.JIANYU_IMAGE_ENDPOINT }}
           IMAGE_API_KEYS: ${{ secrets.IMAGE_API_KEYS }}
+          IMAGE_API_KEYS_V2: ${{ secrets.IMAGE_API_KEYS_V2 }}
         run: gradle --no-daemon :app:assembleRelease
       - name: Package and verify APK
         run: |

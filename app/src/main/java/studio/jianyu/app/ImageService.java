@@ -21,9 +21,11 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import javax.net.ssl.HttpsURLConnection;
@@ -33,7 +35,8 @@ final class ImageService {
     private static final int REFERENCE_LIMIT = 4 * 1024 * 1024;
     private static final int JSON_LIMIT = 1024 * 1024;
     private static final int MAX_DETAIL = 300;
-    private static final String API_BASE = "https://img.pipiwangcom.com/api/v1";
+    private static final String LINE1_BASE = "https://img.pipiwangcom.com/api/v1";
+    private static final String LINE2_BASE = "https://image.mlgb7.com";
     private static final Pattern TASK_ID = Pattern.compile("[A-Za-z0-9_-]{1,128}");
     private static final Pattern KEY_SPLIT = Pattern.compile("[\\s,;]+");
 
@@ -72,7 +75,11 @@ final class ImageService {
     }
 
     boolean isDirectMode() { return BuildConfig.IMAGE_ENDPOINT.isEmpty(); }
-    boolean isConfigured() { return !isDirectMode() || !activeKeys().isEmpty(); }
+    boolean isConfigured() { return !isDirectMode() || !activeKeysLine1().isEmpty() || !activeKeysLine2().isEmpty(); }
+    boolean isLineConfigured(String model) {
+        if (!isDirectMode()) return true;
+        return isLine2(model) ? !activeKeysLine2().isEmpty() : !activeKeysLine1().isEmpty();
+    }
 
     static List<String> parseKeys(String raw) {
         List<String> result = new ArrayList<>();
@@ -85,15 +92,20 @@ final class ImageService {
         return result;
     }
 
-    private List<String> activeKeys() {
+    List<String> activeKeysLine1() {
         return parseKeys(BuildConfig.IMAGE_API_KEYS);
     }
 
-    private synchronized String nextKey(List<String> keys) {
-        int cursor = config.getInt("key_cursor", 0);
+    List<String> activeKeysLine2() {
+        return parseKeys(BuildConfig.IMAGE_API_KEYS_V2);
+    }
+
+    private synchronized String nextKey(List<String> keys, String cursorKey) {
+        if (keys.isEmpty()) return "";
+        int cursor = config.getInt(cursorKey, 0);
         if (cursor < 0) cursor = 0;
         String key = keys.get(cursor % keys.size());
-        config.edit().putInt("key_cursor", (cursor + 1) % keys.size()).commit();
+        config.edit().putInt(cursorKey, (cursor + 1) % keys.size()).commit();
         return key;
     }
 
@@ -318,8 +330,19 @@ final class ImageService {
         return ok;
     }
 
+    static boolean isLine2(String wireModel) {
+        if (wireModel == null) return false;
+        return wireModel.startsWith("gpt-image-") || wireModel.startsWith("gpt-") || "GPT-2.5".equalsIgnoreCase(wireModel);
+    }
+
     private static String wireToDisplayModel(String wireModel) {
-        return "Image 2".equals(wireModel) ? "Grok" : "GPT";
+        if ("image-1".equals(wireModel) || "Image 1".equals(wireModel)) return "GPT";
+        if ("image-2".equals(wireModel) || "Image 2".equals(wireModel)) return "Grok";
+        if ("gpt-image-2.5".equals(wireModel)) return "GPT-2.5";
+        if ("gpt-image-2.5-flare".equals(wireModel)) return "GPT-2.5 Flare";
+        if ("gpt-image-2.5-sunburst".equals(wireModel)) return "GPT-2.5 Sunburst";
+        if ("gpt-image-2".equals(wireModel)) return "GPT-2";
+        return wireModel == null ? "GPT-2.5" : wireModel;
     }
 
     String run(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
@@ -347,7 +370,7 @@ final class ImageService {
                 conn.setRequestProperty("Accept", "application/json, image/png, image/jpeg, image/webp");
                 if (submit) {
                     JSONObject body = new JSONObject().put("prompt", prompt).put("model", model).put("ratio", ratio);
-                    if ("Image 2".equals(model)) body.put("nsfw", nsfw);
+                    if ("Image 2".equals(model) || "image-2".equals(model)) body.put("nsfw", nsfw);
                     if (reference != null) body.put("image", referenceData(reference));
                     sendJson(conn, body);
                 }
@@ -379,6 +402,17 @@ final class ImageService {
     }
 
     private String runDirect(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
+        if (hasPending()) {
+            model = pending.getString("model", model);
+        }
+        if (isLine2(model)) {
+            return runDirectLine2(prompt, model, ratio, reference);
+        } else {
+            return runDirectLine1(prompt, model, ratio, reference, nsfw);
+        }
+    }
+
+    private String runDirectLine1(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
         String task = pending.getString("task", "");
         String imageUrl = pending.getString("url", "");
         String taskKey = pending.getString("key", "");
@@ -392,14 +426,14 @@ final class ImageService {
         boolean submit = task.isEmpty();
         while (true) {
             if (cancelled) throw new IOException("已取消本次等待。");
-            List<String> keys = activeKeys();
+            List<String> keys = activeKeysLine1();
             int status = 502;
             JSONObject result = new JSONObject();
             String usedKey = taskKey;
             if (submit) {
-                if (keys.isEmpty()) throw new IOException("请先配置生图 API 密钥。");
-                usedKey = nextKey(keys);
-                boolean isGrok = "Image 2".equals(model);
+                if (keys.isEmpty()) throw new IOException("请先配置线路 1 密钥。");
+                usedKey = nextKey(keys, "key_cursor_line1");
+                boolean isGrok = "image-2".equals(model) || "Image 2".equals(model);
                 String upstreamModel = isGrok ? "image-2" : "image-1";
                 String quality = isGrok ? "1k" : "auto";
                 String size = directSize(upstreamModel, ratio);
@@ -416,7 +450,7 @@ final class ImageService {
                     body.put("image", referenceData(reference));
                     path = "/images/edits";
                 }
-                HttpsURLConnection conn = openTracked(new URL(API_BASE + path), 1900000);
+                HttpsURLConnection conn = openTracked(new URL(LINE1_BASE + path), 1900000);
                 try {
                     conn.setRequestProperty("Authorization", "Bearer " + usedKey);
                     conn.setRequestProperty("Accept", "application/json");
@@ -433,11 +467,11 @@ final class ImageService {
                 for (String key : keys) {
                     if (!candidates.contains(key)) candidates.add(key);
                 }
-                if (candidates.isEmpty()) throw new IOException("请先配置生图 API 密钥。");
+                if (candidates.isEmpty()) throw new IOException("请先配置线路 1 密钥。");
                 for (String candidate : candidates) {
                     if (cancelled) throw new IOException("已取消本次等待。");
                     usedKey = candidate;
-                    HttpsURLConnection conn = openTracked(new URL(API_BASE + "/tasks/" + Uri.encode(task)), 60000);
+                    HttpsURLConnection conn = openTracked(new URL(LINE1_BASE + "/tasks/" + Uri.encode(task)), 60000);
                     try {
                         conn.setRequestProperty("Authorization", "Bearer " + candidate);
                         conn.setRequestProperty("Accept", "application/json");
@@ -451,39 +485,41 @@ final class ImageService {
                 }
             }
 
-            task = jsonTaskId(result, task);
-            taskKey = usedKey;
-            if ((status == 502 || status == 504) && !task.isEmpty()) {
-                savePending(prompt, task, "", usedKey, model, ratio);
-                if (!submit) throw new IOException("原任务仍在处理中，稍后可继续查询。");
-                submit = false;
-                continue;
-            }
-            String detailText = extractDetail(result);
-            if (status < 200 || status >= 300) {
-                if (!task.isEmpty()) savePending(prompt, task, "", usedKey, model, ratio);
-                String base;
-                if (status == 400 || status == 422) base = "检查提示词、模型及参考图。";
-                else if (status == 401) base = "请检查生图 API 密钥。";
-                else if (status == 403) base = "请检查生图服务账户权限。";
-                else if (status == 429) base = "请求过于频繁，请稍后再试。";
-                else base = "服务未返回作品，请核对任务记录。";
-                throw new IOException(formatError(base, detailText));
-            }
-            JSONObject container = result.optJSONObject("result");
-            if (container == null) container = result;
-            JSONArray images = container.optJSONArray("data");
-            if (images != null) {
-                for (int i = 0; i < images.length(); i++) {
-                    JSONObject item = images.optJSONObject(i);
-                    String url = jsonString(item, "url");
-                    if (url.startsWith("https://")) {
+            JSONArray data = result.optJSONArray("data");
+            if (data != null && data.length() > 0) {
+                for (int i = 0; i < data.length(); i++) {
+                    String url = jsonString(data.optJSONObject(i), "url");
+                    if (url.startsWith("https://") || url.startsWith("http://")) {
                         savePending(prompt, task, url, usedKey, model, ratio);
                         return download(url, prompt, meta);
                     }
                 }
             }
+            JSONObject container = result.optJSONObject("data");
+            if (container == null) container = result;
+            String url = jsonString(container, "url");
+            if (url.isEmpty()) url = jsonString(container, "image_url");
+            if (url.startsWith("https://") || url.startsWith("http://")) {
+                savePending(prompt, task, url, usedKey, model, ratio);
+                return download(url, prompt, meta);
+            }
+            task = jsonTaskId(result, task);
+            if (task.isEmpty()) task = jsonTaskId(container, task);
+            taskKey = usedKey;
+            String detailText = extractDetail(result);
+            if (detailText.isEmpty()) detailText = extractDetail(container);
+            if (status < 200 || status >= 300) {
+                if (!task.isEmpty()) savePending(prompt, task, "", usedKey, model, ratio);
+                String base;
+                if (status == 400 || status == 422) base = "请检查提示词或参考图。";
+                else if (status == 401) base = "请检查线路 1 密钥。";
+                else if (status == 403) base = "请检查生图服务账户权限。";
+                else if (status == 429) base = "请求过于频繁，请稍后再试。";
+                else base = "线路 1 未返回作品，请核对任务记录。";
+                throw new IOException(formatError(base, detailText));
+            }
             String state = jsonString(result, "status").toLowerCase(Locale.ROOT);
+            if (state.isEmpty()) state = jsonString(container, "status").toLowerCase(Locale.ROOT);
             boolean activeState = "queued".equals(state) || "pending".equals(state)
                     || "running".equals(state) || "processing".equals(state);
             boolean failed = "failed".equals(state) || "error".equals(state)
@@ -492,17 +528,257 @@ final class ImageService {
                     || (container.has("delivered_count") && container.optInt("delivered_count", -1) == 0 && !activeState);
             if (failed) {
                 forget();
-                throw new IOException(formatError("任务未交付图片，请核对任务与额度记录。", detailText));
+                throw new IOException(formatError("任务未交付图片，请重试。", detailText));
             }
             boolean doneState = "completed".equals(state) || "done".equals(state)
                     || "succeeded".equals(state) || "success".equals(state);
             if (!task.isEmpty() && !doneState) {
                 savePending(prompt, task, "", usedKey, model, ratio);
-                if (!submit) throw new IOException("原任务仍在处理中，稍后可继续查询。");
-                submit = false;
+                if (submit) {
+                    submit = false;
+                    try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
+                    continue;
+                }
+                try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
+                continue;
+            }
+            if (!submit && !task.isEmpty()) {
+                try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
                 continue;
             }
             throw new IOException(formatError("结果中缺少可下载的图片地址。", detailText));
+        }
+    }
+
+    private String runDirectLine2(String prompt, String model, String ratio, Uri reference) throws Exception {
+        String task = pending.getString("task", "");
+        String imageUrl = pending.getString("url", "");
+        String taskKey = pending.getString("key", "");
+        if (hasPending()) {
+            prompt = pending.getString("prompt", prompt);
+            model = pending.getString("model", model);
+            ratio = pending.getString("ratio", ratio);
+        }
+        String meta = wireToDisplayModel(model) + "|" + ratio;
+        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
+        boolean submit = task.isEmpty();
+        while (true) {
+            if (cancelled) throw new IOException("已取消本次等待。");
+            List<String> keys = activeKeysLine2();
+            int status = 502;
+            JSONObject result = new JSONObject();
+            String usedKey = taskKey;
+            if (submit) {
+                if (keys.isEmpty()) throw new IOException("请先配置线路 2 密钥。");
+                usedKey = nextKey(keys, "key_cursor_line2");
+                if (reference == null) {
+                    // 文生图接口：POST /v1/images/generations
+                    JSONObject body = new JSONObject()
+                            .put("model", model)
+                            .put("prompt", prompt)
+                            .put("n", 1)
+                            .put("async", true)
+                            .put("response_format", "url");
+                    HttpsURLConnection conn = openTracked(new URL(LINE2_BASE + "/v1/images/generations"), 1900000);
+                    try {
+                        conn.setRequestProperty("Authorization", "Bearer " + usedKey);
+                        conn.setRequestProperty("Accept", "application/json");
+                        sendJson(conn, body);
+                        status = conn.getResponseCode();
+                        result = readJson(conn, status);
+                    } finally {
+                        if (activeConn == conn) activeConn = null;
+                        conn.disconnect();
+                    }
+                } else {
+                    // 图生图接口：POST /v1/images/edits (multipart/form-data)
+                    String boundary = "----JianyuFormBoundary" + System.currentTimeMillis();
+                    Map<String, String> fields = new LinkedHashMap<>();
+                    fields.put("model", model);
+                    fields.put("prompt", prompt);
+                    fields.put("n", "1");
+                    fields.put("response_format", "url");
+                    HttpsURLConnection conn = openTracked(new URL(LINE2_BASE + "/v1/images/edits"), 1900000);
+                    try {
+                        conn.setRequestProperty("Authorization", "Bearer " + usedKey);
+                        conn.setRequestProperty("Accept", "application/json");
+                        sendMultipart(conn, boundary, fields, "image", reference);
+                        status = conn.getResponseCode();
+                        result = readJson(conn, status);
+                    } finally {
+                        if (activeConn == conn) activeConn = null;
+                        conn.disconnect();
+                    }
+                }
+            } else {
+                // 异步任务状态轮询：GET /api/image-tasks?ids={task}
+                List<String> candidates = new ArrayList<>();
+                if (!taskKey.isEmpty()) candidates.add(taskKey);
+                for (String key : keys) {
+                    if (!candidates.contains(key)) candidates.add(key);
+                }
+                if (candidates.isEmpty()) throw new IOException("请先配置线路 2 密钥。");
+                for (String candidate : candidates) {
+                    if (cancelled) throw new IOException("已取消本次等待。");
+                    usedKey = candidate;
+                    HttpsURLConnection conn = openTracked(new URL(LINE2_BASE + "/api/image-tasks?ids=" + Uri.encode(task)), 60000);
+                    try {
+                        conn.setRequestProperty("Authorization", "Bearer " + candidate);
+                        conn.setRequestProperty("Accept", "application/json");
+                        status = conn.getResponseCode();
+                        result = readJson(conn, status);
+                    } finally {
+                        if (activeConn == conn) activeConn = null;
+                        conn.disconnect();
+                    }
+                    if (status != 401 && status != 403 && status != 404) break;
+                }
+            }
+
+            // 1. 同步返回 data[0].url
+            JSONArray directData = result.optJSONArray("data");
+            if (directData != null && directData.length() > 0) {
+                for (int i = 0; i < directData.length(); i++) {
+                    JSONObject dItem = directData.optJSONObject(i);
+                    String url = jsonString(dItem, "url");
+                    if (url.startsWith("https://") || url.startsWith("http://")) {
+                        savePending(prompt, "", url, usedKey, model, ratio);
+                        return download(url, prompt, meta);
+                    }
+                }
+            }
+
+            // 2. 轮询结果 items[0]
+            JSONArray pollItems = result.optJSONArray("items");
+            if (pollItems != null && pollItems.length() > 0) {
+                JSONObject pItem = pollItems.optJSONObject(0);
+                if (pItem != null) {
+                    String pStatus = jsonString(pItem, "status").toLowerCase(Locale.ROOT);
+                    if ("success".equals(pStatus)) {
+                        JSONArray pResults = pItem.optJSONArray("results");
+                        if (pResults != null && pResults.length() > 0) {
+                            JSONObject res0 = pResults.optJSONObject(0);
+                            String url = jsonString(res0, "url");
+                            if (url.startsWith("https://") || url.startsWith("http://")) {
+                                savePending(prompt, "", url, usedKey, model, ratio);
+                                return download(url, prompt, meta);
+                            }
+                        }
+                    } else if ("failed".equals(pStatus) || "text_review".equals(pStatus)
+                            || "error".equals(pStatus) || "cancelled".equals(pStatus)) {
+                        forget();
+                        String err = jsonString(pItem, "public_error");
+                        if (err.isEmpty()) err = jsonString(pItem, "error_code");
+                        if (err.isEmpty()) err = "生成未能交付画面，请调整描述后重试。";
+                        throw new IOException(err);
+                    } else {
+                        // queued, running, generating
+                        task = jsonString(pItem, "id");
+                        taskKey = usedKey;
+                        savePending(prompt, task, "", usedKey, model, ratio);
+                        if (!submit) {
+                            try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
+                        }
+                        submit = false;
+                        continue;
+                    }
+                }
+            }
+
+            // 3. 首次提交返回 task_id 进入排队轮询
+            task = jsonTaskId(result, task);
+            taskKey = usedKey;
+            if (!task.isEmpty()) {
+                savePending(prompt, task, "", usedKey, model, ratio);
+                if (submit) {
+                    submit = false;
+                    try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
+                    continue;
+                }
+            }
+
+            String detailText = extractDetail(result);
+            if (status < 200 || status >= 300) {
+                if (!task.isEmpty()) savePending(prompt, task, "", usedKey, model, ratio);
+                String base;
+                if (status == 400 || status == 422) base = "请检查提示词或参考图。";
+                else if (status == 401) base = "请检查线路 2 密钥。";
+                else if (status == 403) base = "请检查生图服务账户权限。";
+                else if (status == 429) base = "请求过于频繁，请稍后再试。";
+                else base = "线路 2 未返回作品，请核对任务记录。";
+                throw new IOException(formatError(base, detailText));
+            }
+
+            if (!submit && !task.isEmpty()) {
+                try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
+                continue;
+            }
+
+            throw new IOException(formatError("结果中缺少可下载的图片地址。", detailText));
+        }
+    }
+
+    private void sendMultipart(HttpsURLConnection conn, String boundary,
+                               Map<String, String> fields,
+                               String fileField, Uri fileUri) throws IOException {
+        byte[] lineEnd = "\r\n".getBytes(StandardCharsets.UTF_8);
+        byte[] twoDashes = "--".getBytes(StandardCharsets.UTF_8);
+        byte[] boundaryBytes = boundary.getBytes(StandardCharsets.UTF_8);
+
+        conn.setRequestMethod("POST");
+        conn.setDoOutput(true);
+        conn.setChunkedStreamingMode(32768);
+        conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+        try (OutputStream out = conn.getOutputStream()) {
+            for (Map.Entry<String, String> entry : fields.entrySet()) {
+                out.write(twoDashes);
+                out.write(boundaryBytes);
+                out.write(lineEnd);
+                String header = "Content-Disposition: form-data; name=\"" + entry.getKey() + "\"\r\n\r\n";
+                out.write(header.getBytes(StandardCharsets.UTF_8));
+                out.write(entry.getValue().getBytes(StandardCharsets.UTF_8));
+                out.write(lineEnd);
+            }
+
+            if (fileField != null && fileUri != null) {
+                out.write(twoDashes);
+                out.write(boundaryBytes);
+                out.write(lineEnd);
+                String fileName = "reference.png";
+                String mimeType = "image/png";
+                try (InputStream checkIn = openUri(fileUri)) {
+                    BitmapFactory.Options o = new BitmapFactory.Options();
+                    o.inJustDecodeBounds = true;
+                    BitmapFactory.decodeStream(checkIn, null, o);
+                    String ext = extension(o);
+                    if (ext != null) {
+                        fileName = "reference." + ext;
+                        if ("jpg".equals(ext)) mimeType = "image/jpeg";
+                        else if ("webp".equals(ext)) mimeType = "image/webp";
+                    }
+                } catch (Exception ignored) { }
+
+                String fileHeader = "Content-Disposition: form-data; name=\"" + fileField + "\"; filename=\"" + fileName + "\"\r\n"
+                        + "Content-Type: " + mimeType + "\r\n\r\n";
+                out.write(fileHeader.getBytes(StandardCharsets.UTF_8));
+
+                try (InputStream in = openUri(fileUri)) {
+                    if (in == null) throw new IOException("无法读取参考图。");
+                    byte[] buffer = new byte[16384];
+                    int len;
+                    while ((len = in.read(buffer)) != -1) {
+                        out.write(buffer, 0, len);
+                    }
+                }
+                out.write(lineEnd);
+            }
+
+            out.write(twoDashes);
+            out.write(boundaryBytes);
+            out.write(twoDashes);
+            out.write(lineEnd);
+            out.flush();
         }
     }
 
