@@ -165,9 +165,8 @@ final class GalleryAdapters {
             } else {
                 h.plazaBar.setVisibility(View.GONE);
                 h.galleryScrim.setVisibility(View.VISIBLE);
-                h.topBadge.setVisibility(View.VISIBLE);
-                String sourceBadge = "hot".equals(item.source) ? "热榜" : ("addon".equals(item.source) ? "精选" : "画廊");
-                h.topBadge.setText(sourceBadge + " · " + item.ratio);
+                h.topBadge.setVisibility(item.ratio.isEmpty() ? View.GONE : View.VISIBLE);
+                h.topBadge.setText(item.ratio);
                 h.galleryTitle.setText(item.title.isEmpty() ? item.prompt : item.title);
                 String cat = !item.category.isEmpty() ? item.category : item.major;
                 h.gallerySub.setVisibility(cat.isEmpty() ? View.GONE : View.VISIBLE);

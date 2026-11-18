@@ -1,6 +1,6 @@
 {
-  "versionCode": 10,
-  "versionName": "0.8.1",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.1/Jianyu-v0.8.1.apk",
-  "releaseNotes": "1. 修复作品库「成品作品 / 生成记录」分段切换器布局塌陷挤压问题，重构为全宽流体药丸控件，文字居中舒展美观。\n2. 修复热榜图鉴离线数据加载：将离线词库直存为标准 JSON 资产，彻底解决 Android AAPT2 自动解包重命名导致的列表空白问题，6,601 条热榜图鉴离线秒级即开。"
+  "versionCode": 11,
+  "versionName": "0.8.2",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.2/Jianyu-v0.8.2.apk",
+  "releaseNotes": "1. 彻底还原提示词卡片角标：移除多余冗余的前缀文本，恢复纯净画面宽高比例标签（如 9:16、3:4、1:1）。\n2. 修复作品库「成品作品 / 生成记录」分段器排版挤压塌陷，重构为全宽流体原生药丸分段控件。\n3. 对齐热榜图鉴标准 JSON 资产加载路径，彻底解决因 AAPT2 剥离后缀导致的 6,601 条热榜空白问题，秒级即开。"
 }
