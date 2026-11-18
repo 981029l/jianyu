@@ -1,6 +1,6 @@
 {
-  "versionCode": 11,
-  "versionName": "0.8.2",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.2/Jianyu-v0.8.2.apk",
-  "releaseNotes": "1. 彻底还原提示词卡片角标：移除多余冗余的前缀文本，恢复纯净画面宽高比例标签（如 9:16、3:4、1:1）。\n2. 修复作品库「成品作品 / 生成记录」分段器排版挤压塌陷，重构为全宽流体原生药丸分段控件。\n3. 对齐热榜图鉴标准 JSON 资产加载路径，彻底解决因 AAPT2 剥离后缀导致的 6,601 条热榜空白问题，秒级即开。"
+  "versionCode": 12,
+  "versionName": "0.8.3",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.3/Jianyu-v0.8.3.apk",
+  "releaseNotes": "1. 配置 noCompress 资源免压缩策略：彻底击穿 Android AssetManager 底层 1MB (UNCOMPRESS_DATA_MAX) 限制，6,601 条热榜图鉴与 1,740 条设计精选实现真·零压缩直读秒开，总库 13,784 条提示词完整加载。\n2. 纯净画面比例角标：彻底移除角标前缀文字，仅呈现纯粹画布比例标签（9:16、3:4、1:1 等）。\n3. 作品库分段器重构：全宽流体药丸分段控件，居中对称、舒展美观。"
 }
