@@ -1,6 +1,6 @@
 {
-  "versionCode": 6,
-  "versionName": "0.6.0",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.6.0/Jianyu-v0.6.0.apk",
-  "releaseNotes": "1. 线路 1 与 线路 2 双线路无缝切换：保留经典线路 1（GPT / Grok），新增线路 2（GPT-2.5 / GPT-2.5 Flare / GPT-2.5 Sunburst / GPT-2 多模型与图生图支持）。\n2. 离线画廊与 1,740 组精选提示词库：内置丰富提示词灵感画廊，秒速浏览与一键填入创作。\n3. 多源独立密钥体系：支持 GitHub Secrets 独立注入各线路密钥，安全稳定。"
+  "versionCode": 7,
+  "versionName": "0.6.1",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.6.1/Jianyu-v0.6.1.apk",
+  "releaseNotes": "1. 纯净多源密钥架构：彻底移除代码中所有明文密钥，完全由 GitHub Secrets 安全注入。\n2. 线路 1 与 线路 2 双线路无缝切换：支持 GPT / Grok 与 GPT-2.5 多模型及图生图。\n3. 内置 7,100+ 提示词灵感画廊（含 1,740 组精选库）。"
 }
