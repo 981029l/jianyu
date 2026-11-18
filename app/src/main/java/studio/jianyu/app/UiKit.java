@@ -189,8 +189,8 @@ final class UiKit {
         pill.setOrientation(LinearLayout.HORIZONTAL);
         pill.setGravity(Gravity.CENTER);
         pill.setBackground(round(context, bgColor, 18));
-        pill.setPadding(dp(context, 13), dp(8), dp(13), dp(8));
-        pill.setMinimumHeight(dp(36));
+        pill.setPadding(dp(context, 13), dp(context, 8), dp(context, 13), dp(context, 8));
+        pill.setMinimumHeight(dp(context, 36));
         pill.setFocusable(true);
         pill.setOnClickListener(v -> onClick.run());
         if (iconRes != 0) {
@@ -206,8 +206,8 @@ final class UiKit {
     static TextView chip(Context context, String label, boolean active, Runnable onClick) {
         TextView view = text(context, label, 12.5f, active ? Color.WHITE : MUTED, active);
         view.setGravity(Gravity.CENTER);
-        view.setPadding(dp(context, 15), dp(8), dp(15), dp(8));
-        view.setMinimumHeight(dp(36));
+        view.setPadding(dp(context, 15), dp(context, 8), dp(context, 15), dp(context, 8));
+        view.setMinimumHeight(dp(context, 36));
         view.setBackground(active ? prismBg(context, 18) : liquidGlass(context, 18));
         if (active) applySoftShadow(view, context, 5, 0x442F5CE0);
         view.setFocusable(true);
@@ -217,14 +217,14 @@ final class UiKit {
 
     static TextView frostedBadge(Context context, String label) {
         TextView view = text(context, label, 10.5f, Color.WHITE, true);
-        view.setPadding(dp(context, 9), dp(4), dp(9), dp(4));
+        view.setPadding(dp(context, 9), dp(context, 4), dp(context, 9), dp(context, 4));
         view.setBackground(darkFrosted(context, 12));
         return view;
     }
 
     static TextView softBadge(Context context, String label, int bg, int fg) {
         TextView view = text(context, label, 11, fg, true);
-        view.setPadding(dp(context, 9), dp(4), dp(9), dp(4));
+        view.setPadding(dp(context, 9), dp(context, 4), dp(context, 9), dp(context, 4));
         view.setBackground(round(context, bg, 12));
         return view;
     }

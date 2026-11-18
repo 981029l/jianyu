@@ -248,7 +248,7 @@ final class GalleryAdapters {
                 plazaBar.setOrientation(LinearLayout.HORIZONTAL);
                 plazaBar.setGravity(Gravity.CENTER_VERTICAL);
                 plazaBar.setBackground(UiKit.darkFrosted(ctx, 15));
-                plazaBar.setPadding(UiKit.dp(ctx, 9), UiKit.dp(5), UiKit.dp(5), UiKit.dp(5));
+                plazaBar.setPadding(UiKit.dp(ctx, 9), UiKit.dp(ctx, 5), UiKit.dp(ctx, 5), UiKit.dp(ctx, 5));
 
                 author = UiKit.text(ctx, "", 11, Color.WHITE, false);
                 author.setMaxLines(1);
@@ -257,7 +257,7 @@ final class GalleryAdapters {
 
                 quickSame = UiKit.text(ctx, "同款", 11, UiKit.BLUE, true);
                 quickSame.setBackground(UiKit.round(ctx, 0xF5FFFFFF, 11));
-                quickSame.setPadding(UiKit.dp(ctx, 10), UiKit.dp(5), UiKit.dp(10), UiKit.dp(5));
+                quickSame.setPadding(UiKit.dp(ctx, 10), UiKit.dp(ctx, 5), UiKit.dp(ctx, 10), UiKit.dp(ctx, 5));
                 LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(-2, -2);
                 qlp.leftMargin = UiKit.dp(ctx, 6);
                 plazaBar.addView(quickSame, qlp);
@@ -273,7 +273,7 @@ final class GalleryAdapters {
                 galleryScrim = new LinearLayout(ctx);
                 galleryScrim.setOrientation(LinearLayout.VERTICAL);
                 galleryScrim.setBackground(UiKit.scrimBottom(20, ctx));
-                galleryScrim.setPadding(UiKit.dp(ctx, 10), UiKit.dp(26), UiKit.dp(10), UiKit.dp(10));
+                galleryScrim.setPadding(UiKit.dp(ctx, 10), UiKit.dp(ctx, 26), UiKit.dp(ctx, 10), UiKit.dp(ctx, 10));
 
                 galleryTitle = UiKit.text(ctx, "", 12.5f, Color.WHITE, true);
                 galleryTitle.setMaxLines(1);
