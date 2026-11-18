@@ -1,6 +1,6 @@
 {
-  "versionCode": 2,
-  "versionName": "0.2.0",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.2.0/Jianyu-v0.2.0.apk",
-  "releaseNotes": "1. 新增应用内检查更新，支持一键下载与覆盖安装。\n2. 启用固定应用签名，后续升级无需卸载、保留本地作品库。\n3. 支持内置多密钥轮询、Grok NSFW 开关、按模型尺寸映射及错误详情提示。"
+  "versionCode": 3,
+  "versionName": "0.3.0",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.3.0/Jianyu-v0.3.0.apk",
+  "releaseNotes": "1. 全新 Apple 浅色液态玻璃界面：启用「极光灯塔」新图标与无框微标题标，配备悬浮毛玻璃 3-Tab 底栏与 14 枚 Lucide 矢量图标。\n2. 创作页升级液态玻璃画布、参考图贴纸预览、模型与 5 比例页内直选、以及浅色动态虹彩玻璃光球生成页。\n3. 新增底栏「灵感」Tab：内置实时创意广场（无边框错落瀑布流+一步同款）与 5,443 条离线可搜提示词画廊。\n4. 作品库升级 Apple Photos 无边框相册网格；详情页新增环境光晕、一键复制、同款再创作、设为参考图与删除；升级四边留白悬浮玻璃更新卡。"
 }

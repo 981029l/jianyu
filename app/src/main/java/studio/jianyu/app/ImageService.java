@@ -78,7 +78,7 @@ final class ImageService {
 
     private String referenceData(Uri reference) throws IOException {
         byte[] bytes;
-        try (InputStream input = context.getContentResolver().openInputStream(reference);
+        try (InputStream input = openUri(reference);
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             if (input == null) throw new IOException("无法读取参考图，请重新选择。");
             copy(input, out, REFERENCE_LIMIT, "参考图超过 4 MiB，请选择较小的图片。");
@@ -91,6 +91,89 @@ final class ImageService {
         return "data:" + info.outMimeType + ";base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
     }
 
+    InputStream openUri(Uri uri) throws IOException {
+        if (uri == null) return null;
+        if ("file".equals(uri.getScheme()) && uri.getPath() != null) {
+            return new FileInputStream(new File(uri.getPath()));
+        }
+        return context.getContentResolver().openInputStream(uri);
+    }
+
+    Uri cacheRemoteReference(String address) throws IOException {
+        File dir = new File(context.getCacheDir(), "refs");
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("无法创建参考图缓存目录。");
+        File raw = File.createTempFile("remote-", ".tmp", dir);
+        try {
+            URL target = new URL(address);
+            for (int redirects = 0; redirects < 5; redirects++) {
+                HttpsURLConnection conn = open(target, 30000);
+                try {
+                    int status = conn.getResponseCode();
+                    if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
+                        target = new URL(target, conn.getHeaderField("Location"));
+                        continue;
+                    }
+                    if (status != 200) throw new IOException("无法下载参考图（HTTP " + status + "）。");
+                    try (InputStream in = conn.getInputStream();
+                         OutputStream out = new FileOutputStream(raw)) {
+                        copy(in, out, IMAGE_LIMIT, "图片体积过大。");
+                    }
+                    break;
+                } finally { conn.disconnect(); }
+            }
+            BitmapFactory.Options info = new BitmapFactory.Options();
+            info.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(raw.getPath(), info);
+            String ext = extension(info);
+            if (ext == null) throw new IOException("图片格式不受支持。");
+            if (raw.length() <= REFERENCE_LIMIT) {
+                File dest = new File(dir, "ref-" + System.currentTimeMillis() + "." + ext);
+                if (!raw.renameTo(dest)) throw new IOException("参考图缓存失败。");
+                return Uri.fromFile(dest);
+            }
+            // 超 4 MiB 时降采样压缩为 JPEG 以满足图改图接口限制
+            BitmapFactory.Options dec = new BitmapFactory.Options();
+            dec.inSampleSize = 1;
+            while ((long) Math.max(info.outWidth, info.outHeight) / dec.inSampleSize > 1600) dec.inSampleSize *= 2;
+            android.graphics.Bitmap bmp = BitmapFactory.decodeFile(raw.getPath(), dec);
+            if (bmp == null) throw new IOException("无法解码参考图。");
+            File dest = new File(dir, "ref-" + System.currentTimeMillis() + ".jpg");
+            try (OutputStream out = new FileOutputStream(dest)) {
+                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, out);
+            } finally { bmp.recycle(); }
+            return Uri.fromFile(dest);
+        } finally {
+            if (raw.exists()) raw.delete();
+        }
+    }
+
+    String modelLabel(String id) {
+        if (id == null || id.isEmpty()) return "GPT";
+        String meta = context.getSharedPreferences("art-meta", Context.MODE_PRIVATE).getString(id, "");
+        int sep = meta.indexOf('|');
+        return sep > 0 ? meta.substring(0, sep) : "";
+    }
+
+    String ratioLabel(String id) {
+        if (id == null || id.isEmpty()) return "1:1";
+        String meta = context.getSharedPreferences("art-meta", Context.MODE_PRIVATE).getString(id, "");
+        int sep = meta.indexOf('|');
+        return sep >= 0 && sep + 1 < meta.length() ? meta.substring(sep + 1) : "";
+    }
+
+    boolean deleteArtwork(String id) {
+        if (id == null || id.isEmpty()) return false;
+        File file = new File(new File(context.getFilesDir(), "images"), id);
+        boolean ok = !file.exists() || file.delete();
+        context.getSharedPreferences("art", Context.MODE_PRIVATE).edit().remove(id).apply();
+        context.getSharedPreferences("art-meta", Context.MODE_PRIVATE).edit().remove(id).apply();
+        return ok;
+    }
+
+    private static String wireToDisplayModel(String wireModel) {
+        return "Image 2".equals(wireModel) ? "Grok" : "GPT";
+    }
+
     String run(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
         if (!isDirectMode()) return runGateway(prompt, model, ratio, reference, nsfw);
         return runDirect(prompt, model, ratio, reference, nsfw);
@@ -99,8 +182,13 @@ final class ImageService {
     private String runGateway(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
         String task = pending.getString("task", "");
         String imageUrl = pending.getString("url", "");
-        if (hasPending()) prompt = pending.getString("prompt", prompt);
-        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt);
+        if (hasPending()) {
+            prompt = pending.getString("prompt", prompt);
+            model = pending.getString("model", model);
+            ratio = pending.getString("ratio", ratio);
+        }
+        String meta = wireToDisplayModel(model) + "|" + ratio;
+        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
         boolean submit = task.isEmpty();
         while (true) {
             String endpoint = BuildConfig.IMAGE_ENDPOINT + (submit ? "" : "?task_id=" + Uri.encode(task));
@@ -116,13 +204,13 @@ final class ImageService {
                 int status = conn.getResponseCode();
                 String type = conn.getContentType();
                 if (status == 200 && (type == null || !type.toLowerCase(Locale.ROOT).contains("json"))) {
-                    try (InputStream in = conn.getInputStream()) { return save(in, prompt); }
+                    try (InputStream in = conn.getInputStream()) { return save(in, prompt, meta); }
                 }
                 JSONObject result = readJson(conn, status);
                 task = jsonTaskId(result, task);
                 imageUrl = jsonString(result, "image_url");
-                savePending(prompt, task, imageUrl, "");
-                if (status == 200 && !imageUrl.isEmpty()) return download(imageUrl, prompt);
+                savePending(prompt, task, imageUrl, "", model, ratio);
+                if (status == 200 && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
                 if (status == 202 && !task.isEmpty()) {
                     if (!submit) throw new IOException("原任务仍在处理中，稍后可继续查询。");
                     submit = false;
@@ -141,8 +229,13 @@ final class ImageService {
         String task = pending.getString("task", "");
         String imageUrl = pending.getString("url", "");
         String taskKey = pending.getString("key", "");
-        if (hasPending()) prompt = pending.getString("prompt", prompt);
-        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt);
+        if (hasPending()) {
+            prompt = pending.getString("prompt", prompt);
+            model = pending.getString("model", model);
+            ratio = pending.getString("ratio", ratio);
+        }
+        String meta = wireToDisplayModel(model) + "|" + ratio;
+        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
         boolean submit = task.isEmpty();
         while (true) {
             List<String> keys = activeKeys();
@@ -200,14 +293,14 @@ final class ImageService {
             task = jsonTaskId(result, task);
             taskKey = usedKey;
             if ((status == 502 || status == 504) && !task.isEmpty()) {
-                savePending(prompt, task, "", usedKey);
+                savePending(prompt, task, "", usedKey, model, ratio);
                 if (!submit) throw new IOException("原任务仍在处理中，稍后可继续查询。");
                 submit = false;
                 continue;
             }
             String detailText = extractDetail(result);
             if (status < 200 || status >= 300) {
-                if (!task.isEmpty()) savePending(prompt, task, "", usedKey);
+                if (!task.isEmpty()) savePending(prompt, task, "", usedKey, model, ratio);
                 String base;
                 if (status == 400 || status == 422) base = "检查提示词、模型及参考图。";
                 else if (status == 401) base = "请检查生图 API 密钥。";
@@ -224,8 +317,8 @@ final class ImageService {
                     JSONObject item = images.optJSONObject(i);
                     String url = jsonString(item, "url");
                     if (url.startsWith("https://")) {
-                        savePending(prompt, task, url, usedKey);
-                        return download(url, prompt);
+                        savePending(prompt, task, url, usedKey, model, ratio);
+                        return download(url, prompt, meta);
                     }
                 }
             }
@@ -243,7 +336,7 @@ final class ImageService {
             boolean doneState = "completed".equals(state) || "done".equals(state)
                     || "succeeded".equals(state) || "success".equals(state);
             if (!task.isEmpty() && !doneState) {
-                savePending(prompt, task, "", usedKey);
+                savePending(prompt, task, "", usedKey, model, ratio);
                 if (!submit) throw new IOException("原任务仍在处理中，稍后可继续查询。");
                 submit = false;
                 continue;
@@ -252,9 +345,12 @@ final class ImageService {
         }
     }
 
-    private void savePending(String prompt, String task, String imageUrl, String key) {
+    private void savePending(String prompt, String task, String imageUrl, String key, String model, String ratio) {
         if (task.isEmpty() && imageUrl.isEmpty()) return;
-        SharedPreferences.Editor edit = pending.edit().putString("prompt", prompt);
+        SharedPreferences.Editor edit = pending.edit()
+                .putString("prompt", prompt)
+                .putString("model", model)
+                .putString("ratio", ratio);
         if (!task.isEmpty()) edit.putString("task", task);
         if (!imageUrl.isEmpty()) edit.putString("url", imageUrl);
         if (!key.isEmpty()) edit.putString("key", key);
@@ -370,7 +466,7 @@ final class ImageService {
         return prefix + "：" + detail;
     }
 
-    private String download(String address, String prompt) throws IOException {
+    private String download(String address, String prompt, String meta) throws IOException {
         URL target = new URL(address);
         for (int redirects = 0; redirects < 5; redirects++) {
             HttpsURLConnection conn = open(target, 90000);
@@ -381,7 +477,7 @@ final class ImageService {
                     continue;
                 }
                 if (status != 200) throw new IOException("图片下载失败，可返回创作页继续取图。");
-                try (InputStream in = conn.getInputStream()) { return save(in, prompt); }
+                try (InputStream in = conn.getInputStream()) { return save(in, prompt, meta); }
             } finally { conn.disconnect(); }
         }
         throw new IOException("图片下载地址重定向过多。");
@@ -395,7 +491,7 @@ final class ImageService {
         return null;
     }
 
-    private String save(InputStream in, String prompt) throws IOException {
+    private String save(InputStream in, String prompt, String meta) throws IOException {
         File dir = new File(context.getFilesDir(), "images");
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("无法创建作品目录。");
         File tmp = File.createTempFile("pending-", ".tmp", dir);
@@ -409,6 +505,9 @@ final class ImageService {
             String id = System.currentTimeMillis() + "-" + UUID.randomUUID() + "." + ext;
             if (!tmp.renameTo(new File(dir, id))) throw new IOException("作品保存失败。");
             context.getSharedPreferences("art", Context.MODE_PRIVATE).edit().putString(id, prompt).apply();
+            if (meta != null && !meta.isEmpty()) {
+                context.getSharedPreferences("art-meta", Context.MODE_PRIVATE).edit().putString(id, meta).apply();
+            }
             forget();
             return id;
         } finally { if (tmp.exists()) tmp.delete(); }
