@@ -17,9 +17,9 @@ import android.widget.TextView;
 final class UiKit {
     static final int PAPER = 0xFFF7F9FC;
     static final int CARD = 0xFFFFFFFF;
-    static final int GLASS = 0xCCFFFFFF;
-    static final int GLASS_STRONG = 0xE6FFFFFF;
-    static final int GLASS_BORDER = 0xF2FFFFFF;
+    static final int GLASS = 0xE8FFFFFF;
+    static final int GLASS_STRONG = 0xF5FFFFFF;
+    static final int GLASS_BORDER = 0xFFE6EEF8;
     static final int BORDER = 0xFFE2E9F4;
     static final int SOFT = 0xFFECF1F8;
     static final int BLUE = 0xFF2F5CE0;
@@ -81,7 +81,7 @@ final class UiKit {
         GradientDrawable d = new GradientDrawable();
         d.setColor(GLASS_STRONG);
         d.setCornerRadius(dp(context, radiusDp));
-        d.setStroke(dp(context, 1), 0xFFFFFFFF);
+        d.setStroke(dp(context, 1), 0xFFE4ECF6);
         return d;
     }
 
@@ -96,7 +96,7 @@ final class UiKit {
 
     static GradientDrawable darkFrosted(Context context, int radiusDp) {
         GradientDrawable d = new GradientDrawable();
-        d.setColor(0x78141E2E);
+        d.setColor(0x88141E2E);
         d.setCornerRadius(dp(context, radiusDp));
         d.setStroke(dp(context, 1), 0x38FFFFFF);
         return d;
@@ -140,11 +140,11 @@ final class UiKit {
     static LinearLayout circleIconBtn(Context context, int iconRes, int iconTint, int bgColor, Runnable onClick) {
         LinearLayout btn = new LinearLayout(context);
         btn.setGravity(Gravity.CENTER);
-        btn.setBackground(card(context, bgColor, 0xE8FFFFFF, 22));
-        applySoftShadow(btn, context, 6, 0x33182638);
+        btn.setBackground(card(context, bgColor, 0xFFE4ECF6, 22));
+        applySoftShadow(btn, context, 5, 0x2B182638);
         btn.setFocusable(true);
         btn.setOnClickListener(v -> onClick.run());
-        btn.addView(icon(context, iconRes, 18, iconTint));
+        btn.addView(icon(context, iconRes, 19, iconTint));
         return btn;
     }
 
@@ -170,7 +170,7 @@ final class UiKit {
         LinearLayout btn = new LinearLayout(context);
         btn.setOrientation(LinearLayout.HORIZONTAL);
         btn.setGravity(Gravity.CENTER);
-        btn.setBackground(card(context, bgColor, 0xE8FFFFFF, 24));
+        btn.setBackground(card(context, bgColor, 0xFFE4ECF6, 24));
         applySoftShadow(btn, context, 4, 0x22182638);
         btn.setFocusable(true);
         btn.setOnClickListener(v -> onClick.run());
@@ -188,8 +188,9 @@ final class UiKit {
         LinearLayout pill = new LinearLayout(context);
         pill.setOrientation(LinearLayout.HORIZONTAL);
         pill.setGravity(Gravity.CENTER);
-        pill.setBackground(round(context, bgColor, 16));
-        pill.setPadding(dp(context, 11), dp(context, 6), dp(context, 11), dp(context, 6));
+        pill.setBackground(round(context, bgColor, 18));
+        pill.setPadding(dp(context, 13), dp(8), dp(13), dp(8));
+        pill.setMinimumHeight(dp(36));
         pill.setFocusable(true);
         pill.setOnClickListener(v -> onClick.run());
         if (iconRes != 0) {
@@ -198,14 +199,15 @@ final class UiKit {
             ilp.rightMargin = dp(context, 5);
             pill.addView(iv, ilp);
         }
-        pill.addView(text(context, label, 12, fgColor, true));
+        pill.addView(text(context, label, 12.5f, fgColor, true));
         return pill;
     }
 
     static TextView chip(Context context, String label, boolean active, Runnable onClick) {
         TextView view = text(context, label, 12.5f, active ? Color.WHITE : MUTED, active);
         view.setGravity(Gravity.CENTER);
-        view.setPadding(dp(context, 14), dp(context, 7), dp(context, 14), dp(context, 7));
+        view.setPadding(dp(context, 15), dp(8), dp(15), dp(8));
+        view.setMinimumHeight(dp(36));
         view.setBackground(active ? prismBg(context, 18) : liquidGlass(context, 18));
         if (active) applySoftShadow(view, context, 5, 0x442F5CE0);
         view.setFocusable(true);
@@ -215,19 +217,19 @@ final class UiKit {
 
     static TextView frostedBadge(Context context, String label) {
         TextView view = text(context, label, 10.5f, Color.WHITE, true);
-        view.setPadding(dp(context, 9), dp(context, 4), dp(context, 9), dp(context, 4));
+        view.setPadding(dp(context, 9), dp(4), dp(9), dp(4));
         view.setBackground(darkFrosted(context, 12));
         return view;
     }
 
     static TextView softBadge(Context context, String label, int bg, int fg) {
         TextView view = text(context, label, 11, fg, true);
-        view.setPadding(dp(context, 9), dp(context, 4), dp(context, 9), dp(context, 4));
+        view.setPadding(dp(context, 9), dp(4), dp(9), dp(4));
         view.setBackground(round(context, bg, 12));
         return view;
     }
 
-    /** 样式 1：无框极光灯塔微标 + 「见屿 · JIANYU」 + 苹果大标题 */
+    /** 样式 1（仅首页）：无框极光灯塔微标 + 「见屿 · JIANYU」 + 苹果大标题 */
     static LinearLayout styleOneHeader(Context context, String pageTitle, View rightView) {
         LinearLayout row = new LinearLayout(context);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -249,7 +251,7 @@ final class UiKit {
         kicker.addView(brand, blp);
         left.addView(kicker);
 
-        TextView title = text(context, pageTitle, 30, INK, true);
+        TextView title = text(context, pageTitle, 29, INK, true);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
         tlp.topMargin = dp(context, 2);
         left.addView(title, tlp);
@@ -259,10 +261,30 @@ final class UiKit {
         return row;
     }
 
+    /** 灵感 / 作品库原生大标题顶栏（不重复堆叠品牌眉标） */
+    static LinearLayout pageTitleHeader(Context context, String pageTitle, String subtitle, View rightView) {
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+
+        LinearLayout left = new LinearLayout(context);
+        left.setOrientation(LinearLayout.VERTICAL);
+        left.addView(text(context, pageTitle, 29, INK, true));
+        if (subtitle != null && !subtitle.isEmpty()) {
+            TextView sub = text(context, subtitle, 12, MUTED, false);
+            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+            slp.topMargin = dp(context, 2);
+            left.addView(sub, slp);
+        }
+        row.addView(left, new LinearLayout.LayoutParams(0, -2, 1));
+        if (rightView != null) row.addView(rightView);
+        return row;
+    }
+
     static LinearLayout segmentedControl(Context context, String[] labels, int activeIndex, IndexClick listener) {
         LinearLayout bar = new LinearLayout(context);
         bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setBackground(card(context, 0xDCE7EEF8, 0xCCFFFFFF, 22));
+        bar.setBackground(card(context, 0xE2E9F0FA, 0xE6FFFFFF, 22));
         int pad = dp(context, 4);
         bar.setPadding(pad, pad, pad, pad);
         for (int i = 0; i < labels.length; i++) {
@@ -276,7 +298,7 @@ final class UiKit {
             }
             item.setFocusable(true);
             item.setOnClickListener(v -> listener.onSelect(idx));
-            bar.addView(item, new LinearLayout.LayoutParams(0, dp(context, 36), 1));
+            bar.addView(item, new LinearLayout.LayoutParams(0, dp(context, 38), 1));
         }
         return bar;
     }
@@ -287,7 +309,7 @@ final class UiKit {
         card.setGravity(Gravity.CENTER);
         card.setBackground(active ? card(context, BLUE_SOFT, BLUE, 16) : liquidGlass(context, 16));
         if (active) applySoftShadow(card, context, 4, 0x332F5CE0);
-        card.setPadding(dp(context, 4), dp(context, 9), dp(context, 4), dp(context, 8));
+        card.setPadding(dp(context, 4), dp(context, 10), dp(context, 4), dp(context, 9));
         card.setFocusable(true);
         card.setOnClickListener(v -> onClick.run());
 

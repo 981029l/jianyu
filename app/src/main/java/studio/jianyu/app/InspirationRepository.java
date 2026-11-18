@@ -30,6 +30,8 @@ final class InspirationRepository {
     private static final int JSON_LIMIT = 4 * 1024 * 1024;
     private static final int CATALOG_LIMIT = 20 * 1024 * 1024;
     private static final int IMAGE_LIMIT = 12 * 1024 * 1024;
+    private static final String FAV_PREFS = "inspire-favs";
+    private static final String FAV_KEY = "items";
 
     static final class Item {
         final String source;
@@ -39,14 +41,18 @@ final class InspirationRepository {
         final String thumbUrl;
         final String imageUrl;
         final String major;
+        final String rawMajor;
         final String category;
         final String model;
         final String ratio;
         final boolean nsfw;
         final String author;
+        final int width;
+        final int height;
 
         Item(String source, String id, String title, String prompt, String thumbUrl, String imageUrl,
-             String major, String category, String model, String ratio, boolean nsfw, String author) {
+             String major, String rawMajor, String category, String model, String ratio,
+             boolean nsfw, String author, int width, int height) {
             this.source = source;
             this.id = id;
             this.title = title;
@@ -54,18 +60,76 @@ final class InspirationRepository {
             this.thumbUrl = thumbUrl;
             this.imageUrl = imageUrl;
             this.major = major;
+            this.rawMajor = rawMajor;
             this.category = category;
             this.model = model;
             this.ratio = ratio;
             this.nsfw = nsfw;
             this.author = author;
+            this.width = width;
+            this.height = height;
+        }
+
+        String uniqueKey() { return source + ":" + id; }
+
+        float aspectHeightOverWidth() {
+            if (width > 0 && height > 0) {
+                float r = (float) height / (float) width;
+                return Math.max(0.65f, Math.min(1.50f, r));
+            }
+            if ("3:4".equals(ratio)) return 1.33f;
+            if ("4:3".equals(ratio)) return 0.78f;
+            if ("9:16".equals(ratio)) return 1.48f;
+            if ("16:9".equals(ratio)) return 0.66f;
+            return 1.0f;
+        }
+
+        JSONObject toJson() {
+            JSONObject o = new JSONObject();
+            try {
+                o.put("source", source);
+                o.put("id", id);
+                o.put("title", title);
+                o.put("prompt", prompt);
+                o.put("thumbUrl", thumbUrl);
+                o.put("imageUrl", imageUrl);
+                o.put("major", major);
+                o.put("rawMajor", rawMajor);
+                o.put("category", category);
+                o.put("model", model);
+                o.put("ratio", ratio);
+                o.put("nsfw", nsfw);
+                o.put("author", author);
+                o.put("width", width);
+                o.put("height", height);
+            } catch (Exception ignored) { }
+            return o;
+        }
+
+        static Item fromJson(JSONObject o) {
+            if (o == null) return null;
+            return new Item(
+                    o.optString("source", "gallery"),
+                    o.optString("id", ""),
+                    o.optString("title", ""),
+                    o.optString("prompt", ""),
+                    o.optString("thumbUrl", ""),
+                    o.optString("imageUrl", ""),
+                    o.optString("major", ""),
+                    o.optString("rawMajor", ""),
+                    o.optString("category", ""),
+                    o.optString("model", ""),
+                    o.optString("ratio", "1:1"),
+                    o.optBoolean("nsfw", false),
+                    o.optString("author", ""),
+                    o.optInt("width", 1024),
+                    o.optInt("height", 1024));
         }
     }
 
     static final class PageResult {
         final List<Item> items;
         final boolean hasMore;
-
         PageResult(List<Item> items, boolean hasMore) {
             this.items = items;
             this.hasMore = hasMore;
@@ -75,7 +139,6 @@ final class InspirationRepository {
     static final class GalleryData {
         final List<Item> items;
         final List<String> majors;
-
         GalleryData(List<Item> items, List<String> majors) {
             this.items = items;
             this.majors = majors;
@@ -86,7 +149,7 @@ final class InspirationRepository {
     private static final ExecutorService IMAGE_POOL = Executors.newFixedThreadPool(4);
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static final LruCache<String, Bitmap> MEMORY_CACHE = new LruCache<String, Bitmap>(
-            (int) Math.min(32 * 1024, Math.max(8 * 1024, Runtime.getRuntime().maxMemory() / 1024 / 8))) {
+            (int) Math.min(36 * 1024, Math.max(8 * 1024, Runtime.getRuntime().maxMemory() / 1024 / 7))) {
         @Override protected int sizeOf(String key, Bitmap value) {
             return Math.max(1, value.getByteCount() / 1024);
         }
@@ -101,6 +164,16 @@ final class InspirationRepository {
         conn.setReadTimeout(timeoutMs);
         conn.setRequestProperty("User-Agent", "Jianyu-Android/" + BuildConfig.VERSION_NAME);
         return conn;
+    }
+
+    /** 清洗画廊原始脏分类名，保持艺术画廊审美统一 */
+    static String sanitizeMajor(String raw) {
+        if (raw == null) return "综合精选";
+        String trimmed = raw.trim();
+        if (trimmed.isEmpty() || trimmed.contains("未归类") || "其他".equals(trimmed)) return "综合精选";
+        if (trimmed.contains("大凶")) return "风格人像";
+        if ("晓兰".equals(trimmed)) return "精选合集";
+        return trimmed;
     }
 
     static PageResult fetchPlazaPage(int page, int pageSize) throws IOException {
@@ -135,12 +208,13 @@ final class InspirationRepository {
                     String rawModel = optStr(obj, "model").toLowerCase(Locale.ROOT);
                     String provider = optStr(obj, "mediaProvider").toLowerCase(Locale.ROOT);
                     String displayModel = (rawModel.contains("2") || provider.contains("grok")) ? "Grok" : "GPT";
-                    String ratio = inferRatioFromSize(optStr(obj, "size"));
+                    int[] dims = parseSize(optStr(obj, "size"));
+                    String ratio = inferRatio(dims[0], dims[1]);
                     boolean nsfw = obj.optBoolean("nsfw", false);
                     String author = optStr(obj, "nickname");
                     String id = String.valueOf(obj.opt("id"));
                     items.add(new Item("plaza", id, "", prompt, thumb, image,
-                            "", "", displayModel, ratio, nsfw, author));
+                            "", "", "", displayModel, ratio, nsfw, author, dims[0], dims[1]));
                 }
             }
             boolean hasMore = root.optBoolean("hasMore", items.size() >= pageSize);
@@ -187,7 +261,7 @@ final class InspirationRepository {
         try (JsonReader reader = new JsonReader(new InputStreamReader(new FileInputStream(file), StandardCharsets.UTF_8))) {
             reader.beginArray();
             while (reader.hasNext()) {
-                String id = "", title = "", major = "", category = "", prompt = "", image = "", thumb = "";
+                String id = "", title = "", rawMajor = "", category = "", prompt = "", image = "", thumb = "";
                 int width = 0, height = 0;
                 reader.beginObject();
                 while (reader.hasNext()) {
@@ -201,7 +275,7 @@ final class InspirationRepository {
                             id = reader.peek() == JsonToken.NUMBER ? String.valueOf(reader.nextLong()) : reader.nextString().trim();
                             break;
                         case "title": title = reader.nextString().trim(); break;
-                        case "major": major = reader.nextString().trim(); break;
+                        case "major": rawMajor = reader.nextString().trim(); break;
                         case "category": category = reader.nextString().trim(); break;
                         case "prompt": prompt = reader.nextString().trim(); break;
                         case "image": image = reader.nextString().trim(); break;
@@ -219,15 +293,15 @@ final class InspirationRepository {
                 }
                 reader.endObject();
                 if (prompt.isEmpty() || (thumb.isEmpty() && image.isEmpty())) continue;
+                String cleanMajor = sanitizeMajor(rawMajor);
                 String fullThumb = thumb.startsWith("https://") ? thumb : GALLERY_THUMB_BASE + (thumb.isEmpty() ? image : thumb);
                 String fullImage = image.startsWith("https://") ? image : GALLERY_IMAGE_BASE + (image.isEmpty() ? thumb : image);
                 String ratio = inferRatio(width, height);
+                boolean isSensitive = rawMajor.contains("大凶") || category.contains("大凶") || category.contains("诱惑");
                 items.add(new Item("gallery", id, title, prompt, fullThumb, fullImage,
-                        major, category, "", ratio, false, ""));
-                if (!major.isEmpty()) {
-                    Integer count = majorCounts.get(major);
-                    majorCounts.put(major, count == null ? 1 : count + 1);
-                }
+                        cleanMajor, rawMajor, category, "", ratio, isSensitive, "", width, height));
+                Integer count = majorCounts.get(cleanMajor);
+                majorCounts.put(cleanMajor, count == null ? 1 : count + 1);
             }
             reader.endArray();
         }
@@ -251,6 +325,7 @@ final class InspirationRepository {
                 boolean hit = item.title.toLowerCase(Locale.ROOT).contains(q)
                         || item.category.toLowerCase(Locale.ROOT).contains(q)
                         || item.major.toLowerCase(Locale.ROOT).contains(q)
+                        || item.rawMajor.toLowerCase(Locale.ROOT).contains(q)
                         || item.prompt.toLowerCase(Locale.ROOT).contains(q);
                 if (!hit) continue;
             }
@@ -258,6 +333,51 @@ final class InspirationRepository {
         }
         return out;
     }
+
+    // ==================== 本地灵感收藏 ====================
+
+    static List<Item> getFavorites(Context context) {
+        String raw = context.getSharedPreferences(FAV_PREFS, Context.MODE_PRIVATE).getString(FAV_KEY, "[]");
+        List<Item> list = new ArrayList<>();
+        try {
+            JSONArray arr = new JSONArray(raw);
+            for (int i = 0; i < arr.length(); i++) {
+                Item item = Item.fromJson(arr.optJSONObject(i));
+                if (item != null && !item.id.isEmpty()) list.add(item);
+            }
+        } catch (Exception ignored) { }
+        return list;
+    }
+
+    static boolean isFavorite(Context context, Item target) {
+        if (target == null) return false;
+        String key = target.uniqueKey();
+        for (Item item : getFavorites(context)) {
+            if (key.equals(item.uniqueKey())) return true;
+        }
+        return false;
+    }
+
+    static boolean toggleFavorite(Context context, Item target) {
+        if (target == null) return false;
+        List<Item> list = getFavorites(context);
+        String key = target.uniqueKey();
+        boolean removed = false;
+        Iterator<Item> it = list.iterator();
+        while (it.hasNext()) {
+            if (key.equals(it.next().uniqueKey())) {
+                it.remove();
+                removed = true;
+            }
+        }
+        if (!removed) list.add(0, target);
+        JSONArray arr = new JSONArray();
+        for (Item item : list) arr.put(item.toJson());
+        context.getSharedPreferences(FAV_PREFS, Context.MODE_PRIVATE).edit().putString(FAV_KEY, arr.toString()).apply();
+        return !removed;
+    }
+
+    // ==================== 渐进式图片加载与缓存 ====================
 
     static void loadImage(Context context, ImageView target, String url, int maxDim) {
         if (target == null || url == null || url.isEmpty()) return;
@@ -275,10 +395,47 @@ final class InspirationRepository {
             if (bitmap != null) {
                 MEMORY_CACHE.put(cacheKey, bitmap);
                 MAIN.post(() -> {
-                    if (cacheKey.equals(target.getTag())) {
-                        target.setImageBitmap(bitmap);
-                    }
+                    if (cacheKey.equals(target.getTag())) target.setImageBitmap(bitmap);
                 });
+            }
+        });
+    }
+
+    /** 详情页渐进加载：先 0ms 秒显已缓存缩略图，后台原图就绪无缝替换 */
+    static void loadProgressiveImage(Context context, ImageView target, String thumbUrl, String fullUrl, int fullMaxDim) {
+        if (target == null) return;
+        String fullKey = fullMaxDim + ":" + fullUrl;
+        target.setTag(fullKey);
+        Bitmap fullCached = MEMORY_CACHE.get(fullKey);
+        if (fullCached != null && !fullCached.isRecycled()) {
+            target.setImageBitmap(fullCached);
+            return;
+        }
+        Bitmap thumbCached = thumbUrl != null ? MEMORY_CACHE.get("520:" + thumbUrl) : null;
+        if (thumbCached != null && !thumbCached.isRecycled()) {
+            target.setImageBitmap(thumbCached);
+        } else {
+            target.setImageDrawable(null);
+        }
+        Context appContext = context.getApplicationContext();
+        IMAGE_POOL.execute(() -> {
+            if (thumbCached == null && thumbUrl != null && !thumbUrl.isEmpty()) {
+                Bitmap thumbBmp = fetchBitmap(appContext, thumbUrl, 520);
+                if (thumbBmp != null) {
+                    MEMORY_CACHE.put("520:" + thumbUrl, thumbBmp);
+                    MAIN.post(() -> {
+                        if (fullKey.equals(target.getTag())) target.setImageBitmap(thumbBmp);
+                    });
+                }
+            }
+            if (fullUrl != null && !fullUrl.isEmpty()) {
+                Bitmap fullBmp = fetchBitmap(appContext, fullUrl, fullMaxDim);
+                if (fullBmp != null) {
+                    MEMORY_CACHE.put(fullKey, fullBmp);
+                    MAIN.post(() -> {
+                        if (fullKey.equals(target.getTag())) target.setImageBitmap(fullBmp);
+                    });
+                }
             }
         });
     }
@@ -298,12 +455,15 @@ final class InspirationRepository {
             if (bitmap != null) {
                 MEMORY_CACHE.put(cacheKey, bitmap);
                 MAIN.post(() -> {
-                    if (cacheKey.equals(target.getTag())) {
-                        target.setImageBitmap(bitmap);
-                    }
+                    if (cacheKey.equals(target.getTag())) target.setImageBitmap(bitmap);
                 });
             }
         });
+    }
+
+    static void clearMemoryAndGalleryCache() {
+        MEMORY_CACHE.evictAll();
+        galleryCache = null;
     }
 
     static File ensureCachedImage(Context context, String url) throws IOException {
@@ -348,7 +508,7 @@ final class InspirationRepository {
         }
     }
 
-    private static Bitmap decodeSampled(File file, int maxDim) {
+    static Bitmap decodeSampled(File file, int maxDim) {
         BitmapFactory.Options o = new BitmapFactory.Options();
         o.inJustDecodeBounds = true;
         BitmapFactory.decodeFile(file.getPath(), o);
@@ -385,14 +545,16 @@ final class InspirationRepository {
         return "";
     }
 
-    private static String inferRatioFromSize(String size) {
-        if (size == null || !size.contains("x")) return "1:1";
+    private static int[] parseSize(String size) {
+        if (size == null || !size.contains("x")) return new int[]{1024, 1024};
         String[] parts = size.toLowerCase(Locale.ROOT).split("x");
-        if (parts.length != 2) return "1:1";
+        if (parts.length != 2) return new int[]{1024, 1024};
         try {
-            return inferRatio(Integer.parseInt(parts[0].trim()), Integer.parseInt(parts[1].trim()));
+            int w = Integer.parseInt(parts[0].trim());
+            int h = Integer.parseInt(parts[1].trim());
+            return (w > 0 && h > 0) ? new int[]{w, h} : new int[]{1024, 1024};
         } catch (NumberFormatException e) {
-            return "1:1";
+            return new int[]{1024, 1024};
         }
     }
 

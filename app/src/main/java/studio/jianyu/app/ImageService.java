@@ -1,17 +1,26 @@
 package studio.jianyu.app;
 
+import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.util.Base64;
+import androidx.core.content.FileProvider;
 import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 import java.io.*;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -31,6 +40,8 @@ final class ImageService {
     private final Context context;
     private final SharedPreferences pending;
     private final SharedPreferences config;
+    private volatile boolean cancelled;
+    private volatile HttpsURLConnection activeConn;
 
     ImageService(Context context) {
         this.context = context.getApplicationContext();
@@ -40,6 +51,25 @@ final class ImageService {
 
     boolean hasPending() { return pending.contains("task") || pending.contains("url"); }
     void forget() { pending.edit().clear().commit(); }
+
+    void resetCancel() { cancelled = false; }
+    boolean isCancelled() { return cancelled; }
+    void cancelActive() {
+        cancelled = true;
+        HttpsURLConnection conn = activeConn;
+        if (conn != null) {
+            new Thread(() -> {
+                try { conn.disconnect(); } catch (Exception ignored) { }
+            }, "jianyu-cancel").start();
+        }
+    }
+
+    private HttpsURLConnection openTracked(URL url, int timeout) throws IOException {
+        if (cancelled) throw new IOException("已取消本次等待。");
+        HttpsURLConnection conn = open(url, timeout);
+        activeConn = conn;
+        return conn;
+    }
 
     boolean isDirectMode() { return BuildConfig.IMAGE_ENDPOINT.isEmpty(); }
     boolean isConfigured() { return !isDirectMode() || !activeKeys().isEmpty(); }
@@ -81,14 +111,132 @@ final class ImageService {
         try (InputStream input = openUri(reference);
              ByteArrayOutputStream out = new ByteArrayOutputStream()) {
             if (input == null) throw new IOException("无法读取参考图，请重新选择。");
-            copy(input, out, REFERENCE_LIMIT, "参考图超过 4 MiB，请选择较小的图片。");
+            copy(input, out, IMAGE_LIMIT, "参考图超过 24 MiB，请选择较小的图片。");
             bytes = out.toByteArray();
         }
         BitmapFactory.Options info = new BitmapFactory.Options();
         info.inJustDecodeBounds = true;
         BitmapFactory.decodeByteArray(bytes, 0, bytes.length, info);
         if (extension(info) == null) throw new IOException("请选择 PNG、JPEG 或 WebP 参考图。");
-        return "data:" + info.outMimeType + ";base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
+        String mime = info.outMimeType;
+        if (bytes.length > REFERENCE_LIMIT) {
+            // 自动将超过 4 MiB 的本地手机照片降采样并压缩为 JPEG，避免直接拒收
+            BitmapFactory.Options dec = new BitmapFactory.Options();
+            dec.inSampleSize = 1;
+            while ((long) Math.max(info.outWidth, info.outHeight) / dec.inSampleSize > 1800) dec.inSampleSize *= 2;
+            Bitmap bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.length, dec);
+            if (bmp == null) throw new IOException("无法解码参考图。");
+            try {
+                byte[] compressed = null;
+                for (int q : new int[]{90, 82, 74, 65}) {
+                    ByteArrayOutputStream jpegOut = new ByteArrayOutputStream();
+                    bmp.compress(Bitmap.CompressFormat.JPEG, q, jpegOut);
+                    byte[] attempt = jpegOut.toByteArray();
+                    compressed = attempt;
+                    if (attempt.length <= REFERENCE_LIMIT - 256 * 1024) break;
+                }
+                if (compressed == null || compressed.length > REFERENCE_LIMIT) {
+                    throw new IOException("参考图压缩后仍超过 4 MiB，请更换较小的图片。");
+                }
+                bytes = compressed;
+                mime = "image/jpeg";
+            } finally {
+                bmp.recycle();
+            }
+        }
+        return "data:" + mime + ";base64," + Base64.encodeToString(bytes, Base64.NO_WRAP);
+    }
+
+    /** Android 10+ 零权限一键直存系统相册（Pictures/见屿） */
+    boolean saveToSystemGallery(InputStream in, String displayName, String mime) throws IOException {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false;
+        ContentValues values = new ContentValues();
+        values.put(MediaStore.Images.Media.DISPLAY_NAME, displayName);
+        values.put(MediaStore.Images.Media.MIME_TYPE, mime);
+        values.put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/见屿");
+        values.put(MediaStore.Images.Media.IS_PENDING, 1);
+        Uri uri = context.getContentResolver().insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values);
+        if (uri == null) throw new IOException("无法写入系统相册。");
+        boolean ok = false;
+        try (OutputStream out = context.getContentResolver().openOutputStream(uri)) {
+            if (out == null) throw new IOException("无法打开相册输出流。");
+            copy(in, out, IMAGE_LIMIT, "作品文件过大。");
+            ok = true;
+        } finally {
+            if (ok) {
+                ContentValues done = new ContentValues();
+                done.put(MediaStore.Images.Media.IS_PENDING, 0);
+                context.getContentResolver().update(uri, done, null, null);
+            } else {
+                context.getContentResolver().delete(uri, null, null);
+            }
+        }
+        return true;
+    }
+
+    void shareImageFile(Context uiContext, File file, String mime) {
+        Uri uri = FileProvider.getUriForFile(uiContext, uiContext.getPackageName() + ".fileprovider", file);
+        Intent share = new Intent(Intent.ACTION_SEND)
+                .setType(mime)
+                .putExtra(Intent.EXTRA_STREAM, uri)
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        uiContext.startActivity(Intent.createChooser(share, "分享作品"));
+    }
+
+    String artworkMetaSummary(String id) {
+        if (id == null || id.isEmpty()) return "内置示例 · JPG";
+        File file = new File(new File(context.getFilesDir(), "images"), id);
+        if (!file.isFile()) return "";
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(file.getPath(), o);
+        StringBuilder sb = new StringBuilder();
+        if (o.outWidth > 0 && o.outHeight > 0) sb.append(o.outWidth).append("×").append(o.outHeight);
+        long bytes = file.length();
+        if (bytes > 0) {
+            if (sb.length() > 0) sb.append(" · ");
+            if (bytes >= 1024 * 1024) sb.append(String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0)));
+            else sb.append(Math.max(1, bytes / 1024)).append(" KB");
+        }
+        int dash = id.indexOf('-');
+        if (dash > 0) {
+            try {
+                long ts = Long.parseLong(id.substring(0, dash));
+                String dt = new SimpleDateFormat("MM-dd HH:mm", Locale.CHINA).format(new Date(ts));
+                if (sb.length() > 0) sb.append(" · ");
+                sb.append(dt);
+            } catch (Exception ignored) { }
+        }
+        return sb.toString();
+    }
+
+    long cacheSizeBytes() {
+        return folderSize(context.getCacheDir());
+    }
+
+    void clearAllCaches() {
+        deleteChildren(context.getCacheDir());
+        InspirationRepository.clearMemoryAndGalleryCache();
+    }
+
+    private static long folderSize(File dir) {
+        if (dir == null || !dir.exists()) return 0L;
+        if (dir.isFile()) return dir.length();
+        File[] list = dir.listFiles();
+        if (list == null) return 0L;
+        long total = 0L;
+        for (File f : list) total += folderSize(f);
+        return total;
+    }
+
+    private static void deleteChildren(File dir) {
+        if (dir == null || !dir.isDirectory()) return;
+        File[] list = dir.listFiles();
+        if (list == null) return;
+        for (File f : list) {
+            if (f.isDirectory()) deleteChildren(f);
+            f.delete();
+        }
     }
 
     InputStream openUri(Uri uri) throws IOException {
@@ -175,6 +323,7 @@ final class ImageService {
     }
 
     String run(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
+        resetCancel();
         if (!isDirectMode()) return runGateway(prompt, model, ratio, reference, nsfw);
         return runDirect(prompt, model, ratio, reference, nsfw);
     }
@@ -191,8 +340,9 @@ final class ImageService {
         if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
         boolean submit = task.isEmpty();
         while (true) {
+            if (cancelled) throw new IOException("已取消本次等待。");
             String endpoint = BuildConfig.IMAGE_ENDPOINT + (submit ? "" : "?task_id=" + Uri.encode(task));
-            HttpsURLConnection conn = open(new URL(endpoint), submit ? 1950000 : 60000);
+            HttpsURLConnection conn = openTracked(new URL(endpoint), submit ? 1950000 : 60000);
             try {
                 conn.setRequestProperty("Accept", "application/json, image/png, image/jpeg, image/webp");
                 if (submit) {
@@ -221,7 +371,10 @@ final class ImageService {
                 if (message.isEmpty()) message = extractDetail(result);
                 if (message.isEmpty()) message = "网关未返回作品（HTTP " + status + "），请核对任务记录。";
                 throw new IOException(message);
-            } finally { conn.disconnect(); }
+            } finally {
+                if (activeConn == conn) activeConn = null;
+                conn.disconnect();
+            }
         }
     }
 
@@ -238,6 +391,7 @@ final class ImageService {
         if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
         boolean submit = task.isEmpty();
         while (true) {
+            if (cancelled) throw new IOException("已取消本次等待。");
             List<String> keys = activeKeys();
             int status = 502;
             JSONObject result = new JSONObject();
@@ -262,14 +416,17 @@ final class ImageService {
                     body.put("image", referenceData(reference));
                     path = "/images/edits";
                 }
-                HttpsURLConnection conn = open(new URL(API_BASE + path), 1900000);
+                HttpsURLConnection conn = openTracked(new URL(API_BASE + path), 1900000);
                 try {
                     conn.setRequestProperty("Authorization", "Bearer " + usedKey);
                     conn.setRequestProperty("Accept", "application/json");
                     sendJson(conn, body);
                     status = conn.getResponseCode();
                     result = readJson(conn, status);
-                } finally { conn.disconnect(); }
+                } finally {
+                    if (activeConn == conn) activeConn = null;
+                    conn.disconnect();
+                }
             } else {
                 List<String> candidates = new ArrayList<>();
                 if (!taskKey.isEmpty()) candidates.add(taskKey);
@@ -278,14 +435,18 @@ final class ImageService {
                 }
                 if (candidates.isEmpty()) throw new IOException("请先配置生图 API 密钥。");
                 for (String candidate : candidates) {
+                    if (cancelled) throw new IOException("已取消本次等待。");
                     usedKey = candidate;
-                    HttpsURLConnection conn = open(new URL(API_BASE + "/tasks/" + Uri.encode(task)), 60000);
+                    HttpsURLConnection conn = openTracked(new URL(API_BASE + "/tasks/" + Uri.encode(task)), 60000);
                     try {
                         conn.setRequestProperty("Authorization", "Bearer " + candidate);
                         conn.setRequestProperty("Accept", "application/json");
                         status = conn.getResponseCode();
                         result = readJson(conn, status);
-                    } finally { conn.disconnect(); }
+                    } finally {
+                        if (activeConn == conn) activeConn = null;
+                        conn.disconnect();
+                    }
                     if (status != 401 && status != 403 && status != 404) break;
                 }
             }
@@ -469,7 +630,8 @@ final class ImageService {
     private String download(String address, String prompt, String meta) throws IOException {
         URL target = new URL(address);
         for (int redirects = 0; redirects < 5; redirects++) {
-            HttpsURLConnection conn = open(target, 90000);
+            if (cancelled) throw new IOException("已取消本次等待。");
+            HttpsURLConnection conn = openTracked(target, 90000);
             try {
                 int status = conn.getResponseCode();
                 if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
@@ -478,7 +640,10 @@ final class ImageService {
                 }
                 if (status != 200) throw new IOException("图片下载失败，可返回创作页继续取图。");
                 try (InputStream in = conn.getInputStream()) { return save(in, prompt, meta); }
-            } finally { conn.disconnect(); }
+            } finally {
+                if (activeConn == conn) activeConn = null;
+                conn.disconnect();
+            }
         }
         throw new IOException("图片下载地址重定向过多。");
     }

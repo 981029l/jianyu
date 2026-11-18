@@ -15,7 +15,7 @@
 
 ## 应用内检查更新与发版
 
-- **应用内更新**：App 启动时静默检查更新，也可在创作页右上角点击 `vX.Y.Z · 检查更新` 手动检查。优先通过 jsDelivr CDN / Raw GitHub 读取 `version.json`，并配备 GitHub Releases 302 探针与官方 API 兜底；下载 APK 支持官方直链与 `ghfast.top` 镜像自动回退，完成后通过 `FileProvider` 调起系统安装器覆盖安装。
+- **应用内更新与设置面板**：App 启动时静默检查更新，发现新版本时在创作页右上角「设置」齿轮按钮显示小蓝点提醒；点击齿轮可打开设置面板查看版本/手动检查更新、开关「安全浏览」（默认折叠敏感灵感预览）以及查看/清理图片与画廊缓存。优先通过 jsDelivr CDN / Raw GitHub 读取 `version.json`，并配备 GitHub Releases 302 探针与官方 API 兜底；下载 APK 支持官方直链与 `ghfast.top` 镜像自动回退，完成后通过 `FileProvider` 调起系统安装器覆盖安装。
 - **发布新版本**：修改仓库根目录 `version.json`（递增 `versionCode`、更新 `versionName`、`downloadUrl` 与 `releaseNotes`）并推送到 `main`，GitHub Actions 会自动编译、校验、发布 GitHub Release 并刷新 jsDelivr 缓存。
 
 ## 连接皮皮智绘生图 API

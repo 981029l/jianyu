@@ -6,9 +6,11 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Color;
+import android.graphics.PorterDuff;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -22,10 +24,18 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.Window;
-import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
+import androidx.recyclerview.widget.RecyclerView;
+import androidx.recyclerview.widget.StaggeredGridLayoutManager;
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 import java.io.*;
 import java.util.*;
 
@@ -36,16 +46,92 @@ public final class MainActivity extends Activity {
     private static final int PLAZA_PAGE_SIZE = 24;
     private static final int GALLERY_PAGE_SIZE = 24;
 
+    private static final String PREFS_NAME = "jianyu-prefs";
+    private static final String KEY_SAFE_BROWSE = "safe_browse";
+
+    private static final class OverlayEntry {
+        final String tag;
+        final View view;
+        OverlayEntry(String tag, View view) {
+            this.tag = tag;
+            this.view = view;
+        }
+    }
+
+    // 根视图与持久化 3-Tab 容器（切 Tab / 返回详情永不丢滚动位置）
     private FrameLayout root;
-    private LinearLayout page;
-    private EditText prompt;
-    private String draft = "", screen = "", current = "";
-    private String activePrompt = "", activeModel = "", activeRatio = "";
-    private boolean activeHasRef = false;
+    private FrameLayout tabHost;
+    private FrameLayout overlayHost;
+    private LinearLayout floatingNav;
+    private LinearLayout miniGenBar;
+    private TextView miniGenText;
+    private LinearLayout libraryBatchBar;
+    private TextView libraryBatchCount;
+    private View[] tabContainers = new View[3];
+    private LinearLayout[] navItems = new LinearLayout[3];
+    private ImageView[] navIcons = new ImageView[3];
+    private TextView[] navLabels = new TextView[3];
+    private final List<OverlayEntry> overlayStack = new ArrayList<>();
+
+    // 首页持久化控件
+    private View homeUpdateDot;
+    private LinearLayout homePendingSlot;
+    private LinearLayout homeRefSlot;
+    private EditText promptInput;
+    private TextView promptCounter;
+    private LinearLayout promptClearBtn;
+    private TextView promptRefBtnLabel;
+    private TextView paramSummaryText;
+    private TextView ctaLabelView;
+    private ImageView ctaIconView;
+    private LinearLayout homeRecentSlot;
+
+    // 灵感页持久化控件
+    private LinearLayout inspireSegHolder;
+    private LinearLayout galleryToolsBox;
+    private EditText gallerySearchInput;
+    private View gallerySearchClear;
+    private LinearLayout galleryMajorsRow;
+    private TextView galleryCountLabel;
+    private SwipeRefreshLayout inspireSwipe;
+    private RecyclerView inspireRecycler;
+    private FrameLayout inspireStateBox;
+    private GalleryAdapters.InspirationAdapter inspirationAdapter;
+    private String builtMajorsSignature = "";
+
+    // 作品库持久化控件
+    private TextView librarySubtitleView;
+    private TextView librarySelectBtn;
+    private LinearLayout libraryFilterRow;
+    private RecyclerView libraryRecycler;
+    private FrameLayout libraryEmptyBox;
+    private GalleryAdapters.LocalLibraryAdapter libraryAdapter;
+
+    // 后台生成计时器
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private TextView loadingTimerView;
+    private final Runnable genTimerTick = new Runnable() {
+        @Override public void run() {
+            if (!busy) return;
+            long sec = Math.max(1L, (System.currentTimeMillis() - genStartMillis) / 1000L);
+            if (miniGenText != null) miniGenText.setText("正在绘制 · " + sec + "s");
+            if (loadingTimerView != null) loadingTimerView.setText("已等待 " + sec + " 秒 · 离开此页也会自动存入作品库");
+            uiHandler.postDelayed(this, 1000L);
+        }
+    };
+
+    // 状态字段
+    private int activeTab = 0; // 0: 创作, 1: 灵感, 2: 作品库
+    private boolean imeVisible = false;
+    private String draft = "", current = "";
     private int model, ratio;
     private boolean nsfw;
-    private int libraryFilter; // 0: 全部, 1: GPT, 2: Grok
-    private int inspireTab;    // 0: 创意广场, 1: 提示词画廊
+    private boolean safeBrowse = true;
+    private int libraryFilter = 0; // 0: 全部, 1: GPT, 2: Grok
+    private boolean librarySelectMode = false;
+    private final Set<String> librarySelected = new LinkedHashSet<>();
+
+    private int inspireSubTab = 0; // 0: 创意广场, 1: 提示词画廊, 2: 收藏
     private String galleryMajor = "全部";
     private String galleryQuery = "";
     private int galleryVisibleCount = GALLERY_PAGE_SIZE;
@@ -53,11 +139,18 @@ public final class MainActivity extends Activity {
     private String[] models, wireModels, ratios;
     private Uri reference;
     private ImageService service;
+    private SharedPreferences prefs;
 
-    private static boolean busy;
-    private static boolean checkingUpdate;
-    private static boolean autoCheckedUpdate;
-    private static MainActivity visible;
+    // 跨配置/前后台共享的静态任务状态
+    private static boolean busy = false;
+    private static long activeGenSeq = 0L;
+    private static long genStartMillis = 0L;
+    private static String activePrompt = "", activeModel = "", activeRatio = "";
+    private static boolean activeHasRef = false;
+    private static boolean checkingUpdate = false;
+    private static boolean autoCheckedUpdate = false;
+    private static UpdateManager.UpdateInfo availableUpdate = null;
+    private static MainActivity visible = null;
 
     private static final List<InspirationRepository.Item> plazaItems = new ArrayList<>();
     private static int plazaPage = 0;
@@ -73,31 +166,34 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         service = new ImageService(this);
+        prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+        safeBrowse = prefs.getBoolean(KEY_SAFE_BROWSE, true);
         models = getResources().getStringArray(R.array.models);
         wireModels = getResources().getStringArray(R.array.wire_models);
         ratios = getResources().getStringArray(R.array.ratios);
+
         if (state != null) {
             draft = state.getString("draft", "");
             model = state.getInt("model", 0);
             ratio = state.getInt("ratio", 0);
             nsfw = state.getBoolean("nsfw", false);
             current = state.getString("current", "");
+            activeTab = state.getInt("activeTab", 0);
             libraryFilter = state.getInt("libraryFilter", 0);
-            inspireTab = state.getInt("inspireTab", 0);
+            inspireSubTab = state.getInt("inspireSubTab", 0);
             galleryMajor = state.getString("galleryMajor", "全部");
             galleryQuery = state.getString("galleryQuery", "");
             galleryVisibleCount = state.getInt("galleryVisibleCount", GALLERY_PAGE_SIZE);
             if (state.containsKey("reference")) reference = Uri.parse(state.getString("reference"));
         }
-        getWindow().getDecorView().setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR | View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR);
-        String savedScreen = state != null ? state.getString("screen", "home") : "home";
-        if ("detail".equals(savedScreen)) detail(current);
-        else if ("library".equals(savedScreen)) library();
-        else if ("inspire".equals(savedScreen)) inspire();
-        else if ("inspire_detail".equals(savedScreen) && activeInspiration != null) inspireDetail(activeInspiration);
-        else if ("loading".equals(savedScreen) && busy) loading();
-        else home();
+
+        setupEdgeToEdge();
+        buildRootShell();
+        switchTab(activeTab);
+        refreshHomeDynamic();
+        refreshLibraryContent();
+
+        if (busy) startGenTimer();
 
         if (!autoCheckedUpdate) {
             autoCheckedUpdate = true;
@@ -105,254 +201,348 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void setupEdgeToEdge() {
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        getWindow().setStatusBarColor(Color.TRANSPARENT);
+        getWindow().setNavigationBarColor(Color.TRANSPARENT);
+        WindowInsetsControllerCompat controller = new WindowInsetsControllerCompat(getWindow(), getWindow().getDecorView());
+        controller.setAppearanceLightStatusBars(true);
+        controller.setAppearanceLightNavigationBars(true);
+    }
+
     @Override protected void onStart() {
         super.onStart();
         visible = this;
-        if ("loading".equals(screen) && !busy) home();
-        else if ("library".equals(screen)) library();
+        refreshHomeDynamic();
+        refreshLibraryContent();
+        updateFloatingBarsVisibility();
+        if (busy) startGenTimer();
     }
 
     @Override protected void onStop() {
+        uiHandler.removeCallbacks(genTimerTick);
         if (visible == this) visible = null;
         super.onStop();
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
-        remember();
+        if (promptInput != null) draft = promptInput.getText().toString();
         state.putString("draft", draft);
         state.putInt("model", model);
         state.putInt("ratio", ratio);
         state.putBoolean("nsfw", nsfw);
+        state.putInt("activeTab", activeTab);
         state.putInt("libraryFilter", libraryFilter);
-        state.putInt("inspireTab", inspireTab);
+        state.putInt("inspireSubTab", inspireSubTab);
         state.putString("galleryMajor", galleryMajor);
         state.putString("galleryQuery", galleryQuery);
         state.putInt("galleryVisibleCount", galleryVisibleCount);
         if (reference != null) state.putString("reference", reference.toString());
-        state.putString("screen", screen);
         state.putString("current", current);
-    }
-
-    private void remember() {
-        if (prompt != null) draft = prompt.getText().toString();
     }
 
     private int dp(float v) { return UiKit.dp(this, v); }
     private boolean isGrok() { return "Image 2".equals(wireModels[model]); }
 
-    private void add(View view, int heightDp, int topDp) {
-        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-1, heightDp < 0 ? heightDp : dp(heightDp));
-        p.topMargin = dp(topDp);
-        page.addView(view, p);
-    }
+    // ==================== 根壳与持久化 3-Tab ====================
 
-    /** 浅色晨光画布 + 全屏滚动 + 悬浮液态毛玻璃 3-Tab 药丸底栏 */
-    private void layout(String name, boolean showFloatingNav) {
-        remember();
-        prompt = null;
-        screen = name;
-
+    private void buildRootShell() {
         root = new FrameLayout(this);
         root.setBackground(UiKit.auroraCanvasBg(this));
         root.setFocusableInTouchMode(true);
-        if (Build.VERSION.SDK_INT >= 35) {
-            root.setOnApplyWindowInsetsListener((v, insets) -> {
-                android.graphics.Insets b = insets.getInsets(
-                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout() | WindowInsets.Type.ime());
-                v.setPadding(b.left, b.top, b.right, b.bottom);
-                return insets;
-            });
+
+        ViewCompat.setOnApplyWindowInsetsListener(root, (v, windowInsets) -> {
+            Insets sys = windowInsets.getInsets(WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            Insets ime = windowInsets.getInsets(WindowInsetsCompat.Type.ime());
+            imeVisible = windowInsets.isVisible(WindowInsetsCompat.Type.ime());
+            v.setPadding(sys.left, sys.top, sys.right, Math.max(sys.bottom, ime.bottom));
+            updateFloatingBarsVisibility();
+            return windowInsets;
+        });
+
+        tabHost = new FrameLayout(this);
+        root.addView(tabHost, new FrameLayout.LayoutParams(-1, -1));
+
+        tabContainers[0] = buildHomeTab();
+        tabContainers[1] = buildInspireTab();
+        tabContainers[2] = buildLibraryTab();
+        for (View tab : tabContainers) {
+            tab.setVisibility(View.GONE);
+            tabHost.addView(tab, new FrameLayout.LayoutParams(-1, -1));
         }
+
+        // 悬浮 3-Tab 药丸底栏
+        floatingNav = buildFloatingTabBar();
+        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(dp(296), -2);
+        navLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        navLp.bottomMargin = dp(14);
+        root.addView(floatingNav, navLp);
+
+        // 作品库批量选择底栏
+        libraryBatchBar = buildLibraryBatchBar();
+        FrameLayout.LayoutParams batchLp = new FrameLayout.LayoutParams(-1, -2);
+        batchLp.gravity = Gravity.BOTTOM;
+        batchLp.leftMargin = dp(18);
+        batchLp.rightMargin = dp(18);
+        batchLp.bottomMargin = dp(14);
+        libraryBatchBar.setVisibility(View.GONE);
+        root.addView(libraryBatchBar, batchLp);
+
+        // 后台生图悬浮微胶囊（最小化光球时浮在底栏上方）
+        miniGenBar = buildMiniGenBar();
+        FrameLayout.LayoutParams miniLp = new FrameLayout.LayoutParams(-2, -2);
+        miniLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        miniLp.bottomMargin = dp(86);
+        miniGenBar.setVisibility(View.GONE);
+        root.addView(miniGenBar, miniLp);
+
+        // 二级页面叠加层（详情 / 灵感详情 / 生成中光球 / 全屏缩放）
+        overlayHost = new FrameLayout(this);
+        overlayHost.setVisibility(View.GONE);
+        root.addView(overlayHost, new FrameLayout.LayoutParams(-1, -1));
+
         setContentView(root);
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.setFillViewport(true);
-        scroll.setVerticalScrollBarEnabled(false);
-        root.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
-
-        page = new LinearLayout(this);
-        page.setOrientation(LinearLayout.VERTICAL);
-        page.setPadding(dp(18), dp(14), dp(18), dp(showFloatingNav ? 104 : 28));
-        scroll.addView(page, new FrameLayout.LayoutParams(-1, -2));
-
-        if (showFloatingNav) attachFloatingTabBar();
     }
 
-    private void attachFloatingTabBar() {
+    private LinearLayout buildFloatingTabBar() {
         LinearLayout pill = new LinearLayout(this);
         pill.setOrientation(LinearLayout.HORIZONTAL);
         pill.setGravity(Gravity.CENTER_VERTICAL);
         pill.setBackground(UiKit.floatingPillBg(this, 34));
-        UiKit.applySoftShadow(pill, this, 14, 0x3A182638);
+        UiKit.applySoftShadow(pill, this, 14, 0x36182638);
         pill.setPadding(dp(8), dp(6), dp(8), dp(6));
 
         int[] iconRes = {R.drawable.ic_sparkles, R.drawable.ic_compass, R.drawable.ic_images};
         String[] labels = {"创作", "灵感", "作品库"};
-        String[] keys = {"home", "inspire", "library"};
 
-        for (int i = 0; i < keys.length; i++) {
-            final String key = keys[i];
-            boolean active = key.equals(screen)
-                    || ("home".equals(key) && "loading".equals(screen))
-                    || ("inspire".equals(key) && "inspire_detail".equals(screen))
-                    || ("library".equals(key) && "detail".equals(screen));
+        for (int i = 0; i < 3; i++) {
+            final int idx = i;
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.VERTICAL);
+            item.setGravity(Gravity.CENTER);
+            item.setPadding(dp(12), dp(7), dp(12), dp(7));
+            item.setMinimumHeight(dp(48));
+            item.setFocusable(true);
+            item.setOnClickListener(v -> switchTab(idx));
 
-            LinearLayout tab = new LinearLayout(this);
-            tab.setOrientation(LinearLayout.VERTICAL);
-            tab.setGravity(Gravity.CENTER);
-            tab.setPadding(dp(12), dp(7), dp(12), dp(7));
-            if (active) tab.setBackground(UiKit.round(this, UiKit.BLUE_SOFT, 26));
-            tab.setFocusable(true);
-
-            int tint = active ? UiKit.BLUE : UiKit.MUTED;
-            tab.addView(UiKit.icon(this, iconRes[i], 19, tint));
-            TextView lbl = UiKit.text(this, labels[i], 10.5f, tint, active);
+            ImageView iv = UiKit.icon(this, iconRes[i], 19, UiKit.MUTED);
+            item.addView(iv);
+            TextView lbl = UiKit.text(this, labels[i], 10.5f, UiKit.MUTED, false);
             LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(-2, -2);
             llp.topMargin = dp(2);
-            tab.addView(lbl, llp);
+            item.addView(lbl, llp);
 
-            tab.setOnClickListener(v -> {
-                if ("home".equals(key)) home();
-                else if ("inspire".equals(key)) inspire();
-                else library();
-            });
+            navItems[i] = item;
+            navIcons[i] = iv;
+            navLabels[i] = lbl;
+
             LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1);
             if (i > 0) tlp.leftMargin = dp(4);
-            pill.addView(tab, tlp);
+            pill.addView(item, tlp);
         }
-
-        FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams(dp(296), -2);
-        flp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        flp.bottomMargin = dp(14);
-        root.addView(pill, flp);
+        return pill;
     }
 
-    // ==================== 01 & 02 创作页 ====================
+    private LinearLayout buildMiniGenBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackground(UiKit.floatingPillBg(this, 24));
+        UiKit.applySoftShadow(bar, this, 10, 0x442F5CE0);
+        bar.setPadding(dp(14), dp(8), dp(10), dp(8));
+        bar.setFocusable(true);
+        bar.setOnClickListener(v -> openLoadingOverlay());
 
-    private void home() {
-        layout("home", true);
+        ProgressBar pb = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
+        bar.addView(pb, new LinearLayout.LayoutParams(dp(16), dp(16)));
 
-        // 样式 1 题标：无框极光灯塔微标 + 见屿 · JIANYU + 大标题「创作」+ 右侧更新玻璃胶囊
-        LinearLayout updatePill = new LinearLayout(this);
-        updatePill.setOrientation(LinearLayout.HORIZONTAL);
-        updatePill.setGravity(Gravity.CENTER_VERTICAL);
-        updatePill.setBackground(UiKit.floatingPillBg(this, 18));
-        UiKit.applySoftShadow(updatePill, this, 4, 0x22182638);
-        updatePill.setPadding(dp(11), dp(7), dp(11), dp(7));
-        updatePill.setFocusable(true);
-        updatePill.setOnClickListener(v -> checkUpdate(false));
-        updatePill.addView(UiKit.icon(this, R.drawable.ic_refresh, 14, UiKit.BLUE));
-        TextView vTxt = UiKit.text(this, "v" + BuildConfig.VERSION_NAME + " · 更新", 11.5f, UiKit.INK, true);
-        LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(-2, -2);
-        vlp.leftMargin = dp(5);
-        updatePill.addView(vTxt, vlp);
+        miniGenText = UiKit.text(this, "正在绘制…", 12.5f, UiKit.INK, true);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
+        tlp.leftMargin = dp(8);
+        tlp.rightMargin = dp(10);
+        bar.addView(miniGenText, tlp);
 
-        add(UiKit.styleOneHeader(this, "创作", updatePill), -2, 0);
+        TextView openBtn = UiKit.text(this, "查看", 11.5f, Color.WHITE, true);
+        openBtn.setBackground(UiKit.round(this, UiKit.BLUE, 12));
+        openBtn.setPadding(dp(10), dp(4), dp(10), dp(4));
+        bar.addView(openBtn);
+        return bar;
+    }
 
-        // 灵动岛风待取回任务胶囊
-        boolean pending = service.hasPending();
-        if (pending && !busy) {
-            LinearLayout banner = new LinearLayout(this);
-            banner.setOrientation(LinearLayout.HORIZONTAL);
-            banner.setGravity(Gravity.CENTER_VERTICAL);
-            banner.setBackground(UiKit.card(this, 0xE8EAF0FF, 0xFFC8DAFF, 18));
-            banner.setPadding(dp(12), dp(9), dp(10), dp(9));
-            banner.addView(UiKit.icon(this, R.drawable.ic_clock, 16, UiKit.BLUE));
+    private LinearLayout buildLibraryBatchBar() {
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setBackground(UiKit.floatingPillBg(this, 26));
+        UiKit.applySoftShadow(bar, this, 14, 0x3A182638);
+        bar.setPadding(dp(16), dp(10), dp(12), dp(10));
 
-            TextView msg = UiKit.text(this, "上次作品仍在生成中", 12, UiKit.INK, true);
-            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(0, -2, 1);
-            mlp.leftMargin = dp(8);
-            banner.addView(msg, mlp);
+        libraryBatchCount = UiKit.text(this, "已选 0 项", 13.5f, UiKit.INK, true);
+        bar.addView(libraryBatchCount, new LinearLayout.LayoutParams(0, -2, 1));
 
-            TextView resume = UiKit.text(this, "继续获取", 11.5f, Color.WHITE, true);
-            resume.setBackground(UiKit.round(this, UiKit.BLUE, 13));
-            resume.setPadding(dp(10), dp(5), dp(10), dp(5));
-            resume.setOnClickListener(v -> generate());
-            banner.addView(resume);
+        LinearLayout selectAll = UiKit.pillTagButton(this, 0, "全选", UiKit.SOFT, UiKit.INK, this::toggleSelectAllLibrary);
+        LinearLayout.LayoutParams salp = new LinearLayout.LayoutParams(-2, -2);
+        salp.rightMargin = dp(8);
+        bar.addView(selectAll, salp);
 
-            LinearLayout drop = new LinearLayout(this);
-            drop.setGravity(Gravity.CENTER);
-            drop.setPadding(dp(6), dp(5), dp(4), dp(5));
-            drop.addView(UiKit.icon(this, R.drawable.ic_close, 14, UiKit.MUTED));
-            drop.setOnClickListener(v -> new AlertDialog.Builder(this)
-                    .setMessage("移除本机的取图记录？这不会取消服务端任务。")
-                    .setNegativeButton("返回", null)
-                    .setPositiveButton("移除", (d, w) -> { service.forget(); home(); })
-                    .show());
-            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-2, -2);
-            dlp.leftMargin = dp(4);
-            banner.addView(drop, dlp);
-            add(banner, -2, 12);
+        LinearLayout delBtn = UiKit.pillTagButton(this, R.drawable.ic_trash, "删除", UiKit.DANGER_SOFT, UiKit.DANGER, this::confirmBatchDelete);
+        bar.addView(delBtn);
+        return bar;
+    }
+
+    private void switchTab(int index) {
+        hideKeyboard();
+        if (activeTab == 2 && index != 2 && librarySelectMode) {
+            exitLibrarySelectMode();
         }
+        activeTab = index;
+        for (int i = 0; i < 3; i++) {
+            boolean active = (i == index);
+            tabContainers[i].setVisibility(active ? View.VISIBLE : View.GONE);
+            navItems[i].setBackground(active ? UiKit.round(this, UiKit.BLUE_SOFT, 26) : null);
+            int tint = active ? UiKit.BLUE : UiKit.MUTED;
+            navIcons[i].setColorFilter(tint, PorterDuff.Mode.SRC_IN);
+            navLabels[i].setTextColor(tint);
+            navLabels[i].setTypeface(android.graphics.Typeface.DEFAULT, active ? android.graphics.Typeface.BOLD : android.graphics.Typeface.NORMAL);
+        }
+        if (index == 0) refreshHomeDynamic();
+        else if (index == 1) refreshInspireTab(false);
+        else if (index == 2) refreshLibraryContent();
+        updateFloatingBarsVisibility();
+    }
+
+    private void updateFloatingBarsVisibility() {
+        boolean hasOverlay = !overlayStack.isEmpty();
+        boolean showBatch = !hasOverlay && !imeVisible && activeTab == 2 && librarySelectMode;
+        boolean showNav = !hasOverlay && !imeVisible && !showBatch;
+        floatingNav.setVisibility(showNav ? View.VISIBLE : View.GONE);
+        libraryBatchBar.setVisibility(showBatch ? View.VISIBLE : View.GONE);
+
+        boolean loadingOnTop = isOverlayOpen("loading");
+        boolean zoomOnTop = isOverlayOpen("zoom");
+        boolean showMini = busy && !imeVisible && !loadingOnTop && !zoomOnTop;
+        miniGenBar.setVisibility(showMini ? View.VISIBLE : View.GONE);
+        if (showMini) {
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) miniGenBar.getLayoutParams();
+            lp.bottomMargin = dp((showNav || showBatch) ? 86 : 18);
+            miniGenBar.setLayoutParams(lp);
+        }
+    }
+
+    private boolean isOverlayOpen(String tag) {
+        for (OverlayEntry e : overlayStack) {
+            if (tag.equals(e.tag)) return true;
+        }
+        return false;
+    }
+
+    private void pushOverlay(String tag, View view) {
+        hideKeyboard();
+        view.setClickable(true);
+        view.setFocusable(true);
+        overlayStack.add(new OverlayEntry(tag, view));
+        overlayHost.addView(view, new FrameLayout.LayoutParams(-1, -1));
+        overlayHost.setVisibility(View.VISIBLE);
+        updateFloatingBarsVisibility();
+    }
+
+    private void popOverlay() {
+        if (overlayStack.isEmpty()) return;
+        OverlayEntry top = overlayStack.remove(overlayStack.size() - 1);
+        overlayHost.removeView(top.view);
+        if ("loading".equals(top.tag)) loadingTimerView = null;
+        if (overlayStack.isEmpty()) overlayHost.setVisibility(View.GONE);
+        updateFloatingBarsVisibility();
+    }
+
+    private void popOverlaysByTag(String tag) {
+        for (int i = overlayStack.size() - 1; i >= 0; i--) {
+            OverlayEntry entry = overlayStack.get(i);
+            if (tag.equals(entry.tag)) {
+                overlayStack.remove(i);
+                overlayHost.removeView(entry.view);
+                if ("loading".equals(tag)) loadingTimerView = null;
+            }
+        }
+        if (overlayStack.isEmpty()) overlayHost.setVisibility(View.GONE);
+        updateFloatingBarsVisibility();
+    }
+
+    private void clearOverlays() {
+        overlayStack.clear();
+        overlayHost.removeAllViews();
+        overlayHost.setVisibility(View.GONE);
+        loadingTimerView = null;
+        updateFloatingBarsVisibility();
+    }
+
+    private void hideKeyboard() {
+        View focus = getCurrentFocus();
+        if (focus != null) {
+            InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+            if (imm != null) imm.hideSoftInputFromWindow(focus.getWindowToken(), 0);
+            focus.clearFocus();
+        }
+    }
+
+    // ==================== Tab 0: 创作页（精简一屏布局 + 设置齿轮 + 1行参数胶囊） ====================
+
+    private View buildHomeTab() {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(18), dp(14), dp(18), dp(112));
+        scroll.addView(page, new FrameLayout.LayoutParams(-1, -2));
+
+        // 顶部栏：仅首页保留品牌微标 + 右上角 44dp 设置齿轮（仅发现新版本时亮极小蓝点）
+        FrameLayout settingsWrap = new FrameLayout(this);
+        LinearLayout gearBtn = UiKit.circleIconBtn(this, R.drawable.ic_settings, UiKit.INK, UiKit.GLASS_STRONG, this::showSettingsSheet);
+        settingsWrap.addView(gearBtn, new FrameLayout.LayoutParams(dp(44), dp(44)));
+        homeUpdateDot = new View(this);
+        homeUpdateDot.setBackground(UiKit.round(this, UiKit.BLUE, 5));
+        FrameLayout.LayoutParams dotLp = new FrameLayout.LayoutParams(dp(9), dp(9));
+        dotLp.gravity = Gravity.TOP | Gravity.END;
+        dotLp.topMargin = dp(4);
+        dotLp.rightMargin = dp(4);
+        homeUpdateDot.setVisibility(View.GONE);
+        settingsWrap.addView(homeUpdateDot, dotLp);
+
+        page.addView(UiKit.styleOneHeader(this, "创作", settingsWrap), new LinearLayout.LayoutParams(-1, -2));
+
+        // 待取回任务提示位（动态）
+        homePendingSlot = new LinearLayout(this);
+        homePendingSlot.setOrientation(LinearLayout.VERTICAL);
+        page.addView(homePendingSlot, new LinearLayout.LayoutParams(-1, -2));
 
         // Hero 液态毛玻璃画布卡
         LinearLayout heroCard = new LinearLayout(this);
         heroCard.setOrientation(LinearLayout.VERTICAL);
         heroCard.setBackground(UiKit.liquidGlass(this, 26));
-        UiKit.applySoftShadow(heroCard, this, 10, 0x26182638);
-        heroCard.setPadding(dp(16), dp(14), dp(16), dp(13));
+        UiKit.applySoftShadow(heroCard, this, 10, 0x24182638);
+        heroCard.setPadding(dp(16), dp(14), dp(16), dp(12));
 
-        // 若已选参考图，以 Apple Photos 贴纸风格内嵌画布顶部
-        if (reference != null) {
-            LinearLayout refChip = new LinearLayout(this);
-            refChip.setOrientation(LinearLayout.HORIZONTAL);
-            refChip.setGravity(Gravity.CENTER_VERTICAL);
-            refChip.setBackground(UiKit.card(this, 0xCCF2F6FC, 0xFFFFFFFF, 16));
-            refChip.setPadding(dp(8), dp(8), dp(10), dp(8));
+        homeRefSlot = new LinearLayout(this);
+        homeRefSlot.setOrientation(LinearLayout.VERTICAL);
+        heroCard.addView(homeRefSlot, new LinearLayout.LayoutParams(-1, -2));
 
-            ImageView thumb = new ImageView(this);
-            thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
-            thumb.setBackground(UiKit.round(this, UiKit.SOFT, 11));
-            thumb.setClipToOutline(true);
-            loadReferenceThumb(thumb, reference);
-            refChip.addView(thumb, new LinearLayout.LayoutParams(dp(50), dp(50)));
-
-            LinearLayout info = new LinearLayout(this);
-            info.setOrientation(LinearLayout.VERTICAL);
-            info.addView(UiKit.text(this, "已附带参考图", 13, UiKit.INK, true));
-            TextView sub = UiKit.text(this, "将按画面描述进行图改图", 11, UiKit.MUTED, false);
-            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
-            slp.topMargin = dp(2);
-            info.addView(sub, slp);
-            LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(0, -2, 1);
-            ilp.leftMargin = dp(10);
-            refChip.addView(info, ilp);
-
-            TextView swap = UiKit.text(this, "更换", 11.5f, UiKit.BLUE, true);
-            swap.setBackground(UiKit.round(this, UiKit.BLUE_SOFT, 12));
-            swap.setPadding(dp(10), dp(5), dp(10), dp(5));
-            swap.setOnClickListener(v -> pickReference());
-            refChip.addView(swap);
-
-            LinearLayout remove = new LinearLayout(this);
-            remove.setGravity(Gravity.CENTER);
-            remove.setBackground(UiKit.round(this, UiKit.DANGER_SOFT, 13));
-            remove.addView(UiKit.icon(this, R.drawable.ic_close, 13, UiKit.DANGER));
-            remove.setOnClickListener(v -> { reference = null; home(); });
-            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(dp(26), dp(26));
-            rlp.leftMargin = dp(6);
-            refChip.addView(remove, rlp);
-
-            LinearLayout.LayoutParams refLp = new LinearLayout.LayoutParams(-1, -2);
-            refLp.bottomMargin = dp(10);
-            heroCard.addView(refChip, refLp);
-        }
-
-        prompt = new EditText(this);
-        prompt.setGravity(Gravity.TOP | Gravity.START);
-        prompt.setTextSize(15.5f);
-        prompt.setTextColor(UiKit.INK);
-        prompt.setHintTextColor(0xFF94A3B8);
-        prompt.setSingleLine(false);
-        prompt.setMinLines(4);
-        prompt.setMaxLines(7);
-        prompt.setBackground(null);
-        prompt.setHint("描述你想生成的画面，或去「灵感」挑一个同款…");
-        prompt.setText(draft);
-        prompt.setSelection(draft.length());
-        prompt.setPadding(0, dp(2), 0, dp(10));
-        heroCard.addView(prompt, new LinearLayout.LayoutParams(-1, -2));
+        promptInput = new EditText(this);
+        promptInput.setGravity(Gravity.TOP | Gravity.START);
+        promptInput.setTextSize(15.5f);
+        promptInput.setTextColor(UiKit.INK);
+        promptInput.setHintTextColor(0xFF94A3B8);
+        promptInput.setSingleLine(false);
+        promptInput.setMinLines(4);
+        promptInput.setMaxLines(7);
+        promptInput.setBackground(null);
+        promptInput.setHint("描述你想生成的画面，或去「灵感」挑一个同款…");
+        promptInput.setText(draft);
+        promptInput.setSelection(draft.length());
+        promptInput.setPadding(0, dp(2), 0, dp(10));
+        heroCard.addView(promptInput, new LinearLayout.LayoutParams(-1, -2));
 
         View divider = new View(this);
         divider.setBackgroundColor(0xFFE9EFF8);
@@ -364,126 +554,253 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, -2);
         footLp.topMargin = dp(10);
 
-        TextView counter = UiKit.text(this, draft.codePointCount(0, draft.length()) + " / 4000", 11.5f, UiKit.MUTED, false);
-        foot.addView(counter, new LinearLayout.LayoutParams(0, -2, 1));
+        promptCounter = UiKit.text(this, draft.codePointCount(0, draft.length()) + " / 4000", 11.5f, UiKit.MUTED, false);
+        foot.addView(promptCounter, new LinearLayout.LayoutParams(0, -2, 1));
 
-        LinearLayout clearBtn = UiKit.pillTagButton(this, R.drawable.ic_close, "清空", UiKit.SOFT, UiKit.MUTED, () -> {
+        promptClearBtn = UiKit.pillTagButton(this, R.drawable.ic_close, "清空", UiKit.SOFT, UiKit.MUTED, () -> {
             draft = "";
-            if (prompt != null) prompt.setText("");
+            if (promptInput != null) promptInput.setText("");
         });
-        clearBtn.setVisibility(draft.isEmpty() ? View.GONE : View.VISIBLE);
+        promptClearBtn.setVisibility(draft.isEmpty() ? View.GONE : View.VISIBLE);
         LinearLayout.LayoutParams clrLp = new LinearLayout.LayoutParams(-2, -2);
         clrLp.rightMargin = dp(6);
-        foot.addView(clearBtn, clrLp);
+        foot.addView(promptClearBtn, clrLp);
 
-        LinearLayout refBtn = UiKit.pillTagButton(this, R.drawable.ic_image_plus,
-                reference == null ? "参考图" : "换参考图", UiKit.BLUE_SOFT, UiKit.BLUE, this::pickReference);
+        LinearLayout refBtn = new LinearLayout(this);
+        refBtn.setOrientation(LinearLayout.HORIZONTAL);
+        refBtn.setGravity(Gravity.CENTER);
+        refBtn.setBackground(UiKit.round(this, UiKit.BLUE_SOFT, 18));
+        refBtn.setPadding(dp(13), dp(8), dp(13), dp(8));
+        refBtn.setMinimumHeight(dp(36));
+        refBtn.setFocusable(true);
+        refBtn.setOnClickListener(v -> pickReference());
+        ImageView refIv = UiKit.icon(this, R.drawable.ic_image_plus, 14, UiKit.BLUE);
+        LinearLayout.LayoutParams rilp = new LinearLayout.LayoutParams(dp(14), dp(14));
+        rilp.rightMargin = dp(5);
+        refBtn.addView(refIv, rilp);
+        promptRefBtnLabel = UiKit.text(this, "参考图", 12.5f, UiKit.BLUE, true);
+        refBtn.addView(promptRefBtnLabel);
         foot.addView(refBtn);
         heroCard.addView(foot, footLp);
 
-        prompt.addTextChangedListener(new TextWatcher() {
+        promptInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
             @Override public void afterTextChanged(Editable s) {
                 String value = s.toString();
                 draft = value;
-                counter.setText(value.codePointCount(0, value.length()) + " / 4000");
-                clearBtn.setVisibility(value.isEmpty() ? View.GONE : View.VISIBLE);
+                promptCounter.setText(value.codePointCount(0, value.length()) + " / 4000");
+                promptClearBtn.setVisibility(value.isEmpty() ? View.GONE : View.VISIBLE);
             }
         });
-        add(heroCard, -2, 14);
 
-        // 轻盈模型分段控制行
-        LinearLayout modelRow = new LinearLayout(this);
-        modelRow.setOrientation(LinearLayout.HORIZONTAL);
-        modelRow.setGravity(Gravity.CENTER_VERTICAL);
-        modelRow.addView(UiKit.text(this, "生成模型", 13, UiKit.MUTED, true), new LinearLayout.LayoutParams(0, -2, 1));
-        LinearLayout modelSeg = UiKit.segmentedControl(this, models, model, index -> {
-            if (model != index) { model = index; home(); }
+        LinearLayout.LayoutParams heroLp = new LinearLayout.LayoutParams(-1, -2);
+        heroLp.topMargin = dp(14);
+        page.addView(heroCard, heroLp);
+
+        // 1 行收拢参数摘要胶囊（点击弹出 iOS 风格参数 Bottom Sheet，首屏轻盈不拥挤）
+        LinearLayout paramPill = new LinearLayout(this);
+        paramPill.setOrientation(LinearLayout.HORIZONTAL);
+        paramPill.setGravity(Gravity.CENTER_VERTICAL);
+        paramPill.setBackground(UiKit.liquidGlass(this, 20));
+        UiKit.applySoftShadow(paramPill, this, 4, 0x1E182638);
+        paramPill.setPadding(dp(14), dp(11), dp(14), dp(11));
+        paramPill.setMinimumHeight(dp(50));
+        paramPill.setFocusable(true);
+        paramPill.setOnClickListener(v -> showParameterSheet());
+
+        LinearLayout sliderIcon = new LinearLayout(this);
+        sliderIcon.setGravity(Gravity.CENTER);
+        sliderIcon.setBackground(UiKit.round(this, UiKit.BLUE_SOFT, 11));
+        sliderIcon.addView(UiKit.icon(this, R.drawable.ic_sliders, 16, UiKit.BLUE));
+        paramPill.addView(sliderIcon, new LinearLayout.LayoutParams(dp(32), dp(32)));
+
+        paramSummaryText = UiKit.text(this, "", 13.5f, UiKit.INK, true);
+        LinearLayout.LayoutParams pslp = new LinearLayout.LayoutParams(0, -2, 1);
+        pslp.leftMargin = dp(10);
+        paramPill.addView(paramSummaryText, pslp);
+
+        TextView adjustHint = UiKit.text(this, "参数设置 ›", 12.5f, UiKit.BLUE, true);
+        paramPill.addView(adjustHint);
+
+        LinearLayout.LayoutParams paramLp = new LinearLayout.LayoutParams(-1, -2);
+        paramLp.topMargin = dp(12);
+        page.addView(paramPill, paramLp);
+
+        // 主操作虹彩流光按钮
+        LinearLayout ctaBtn = new LinearLayout(this);
+        ctaBtn.setOrientation(LinearLayout.HORIZONTAL);
+        ctaBtn.setGravity(Gravity.CENTER);
+        ctaBtn.setBackground(UiKit.prismBg(this, 28));
+        UiKit.applySoftShadow(ctaBtn, this, 10, 0x662F5CE0);
+        ctaBtn.setFocusable(true);
+        ctaBtn.setOnClickListener(v -> {
+            if (busy) openLoadingOverlay();
+            else generate();
         });
-        modelRow.addView(modelSeg, new LinearLayout.LayoutParams(dp(184), -2));
-        add(modelRow, -2, 14);
+        ctaIconView = UiKit.icon(this, R.drawable.ic_sparkles, 17, Color.WHITE);
+        LinearLayout.LayoutParams cilp = new LinearLayout.LayoutParams(dp(17), dp(17));
+        cilp.rightMargin = dp(7);
+        ctaBtn.addView(ctaIconView, cilp);
+        ctaLabelView = UiKit.text(this, "生成图片", 15, Color.WHITE, true);
+        ctaBtn.addView(ctaLabelView);
 
-        // 5 格可视化比例胶囊卡片
-        LinearLayout ratioRow = new LinearLayout(this);
-        ratioRow.setOrientation(LinearLayout.HORIZONTAL);
-        for (int i = 0; i < ratios.length; i++) {
-            final int idx = i;
-            LinearLayout card = UiKit.ratioCard(this, ratios[i], idx == ratio, () -> {
-                if (ratio != idx) { ratio = idx; home(); }
-            });
-            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, -2, 1);
-            if (i > 0) rlp.leftMargin = dp(7);
-            ratioRow.addView(card, rlp);
-        }
-        add(ratioRow, -2, 10);
-
-        // Grok 专属液态玻璃 NSFW 开关行
-        if (isGrok()) add(nsfwCard(), -2, 10);
-
-        // Apple Intelligence 浅色流光主操作药丸按钮
-        int ctaIcon = reference == null ? R.drawable.ic_sparkles : R.drawable.ic_wand;
-        String ctaLabel = busy ? "正在处理…"
-                : pending ? "继续获取上次作品"
-                : reference == null ? "生成图片" : "按描述修改参考图";
-        add(UiKit.prismButton(this, ctaIcon, ctaLabel, this::generate), 52, 14);
+        LinearLayout.LayoutParams ctaLp = new LinearLayout.LayoutParams(-1, dp(52));
+        ctaLp.topMargin = dp(14);
+        page.addView(ctaBtn, ctaLp);
 
         if (!service.isConfigured()) {
-            add(UiKit.text(this, "预览版 · 尚未连接生图服务", 12, UiKit.MUTED, false), -2, 8);
+            TextView previewNote = UiKit.text(this, "预览版 · 尚未连接生图服务", 12, UiKit.MUTED, false);
+            LinearLayout.LayoutParams pnl = new LinearLayout.LayoutParams(-2, -2);
+            pnl.topMargin = dp(8);
+            page.addView(previewNote, pnl);
         }
 
-        // Apple Photos 风格最近作品无边框画廊
+        // 最近作品区
         LinearLayout recentHead = new LinearLayout(this);
         recentHead.setOrientation(LinearLayout.HORIZONTAL);
         recentHead.setGravity(Gravity.CENTER_VERTICAL);
-        recentHead.addView(UiKit.text(this, "最近作品", 15, UiKit.INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        recentHead.addView(UiKit.text(this, "最近作品", 15.5f, UiKit.INK, true), new LinearLayout.LayoutParams(0, -2, 1));
         TextView viewAll = UiKit.text(this, "全部 ›", 13, UiKit.BLUE, true);
-        viewAll.setPadding(dp(8), dp(4), dp(2), dp(4));
-        viewAll.setOnClickListener(v -> library());
+        viewAll.setPadding(dp(10), dp(6), dp(2), dp(6));
+        viewAll.setOnClickListener(v -> switchTab(2));
         recentHead.addView(viewAll);
-        add(recentHead, -2, 20);
+        LinearLayout.LayoutParams rhlp = new LinearLayout.LayoutParams(-1, -2);
+        rhlp.topMargin = dp(20);
+        page.addView(recentHead, rhlp);
 
-        add(recentPhotosStrip(), -2, 10);
+        homeRecentSlot = new LinearLayout(this);
+        homeRecentSlot.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams rslp = new LinearLayout.LayoutParams(-1, -2);
+        rslp.topMargin = dp(10);
+        page.addView(homeRecentSlot, rslp);
+
+        return scroll;
     }
 
-    private LinearLayout nsfwCard() {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setBackground(UiKit.liquidGlass(this, 18));
-        UiKit.applySoftShadow(row, this, 4, 0x1E182638);
-        row.setPadding(dp(12), dp(10), dp(12), dp(10));
-        row.setFocusable(true);
+    private void refreshHomeDynamic() {
+        if (homeUpdateDot != null) {
+            homeUpdateDot.setVisibility(availableUpdate != null && availableUpdate.hasUpdate ? View.VISIBLE : View.GONE);
+        }
+        // 更新参数胶囊文案
+        if (paramSummaryText != null) {
+            String summary = models[model] + "  ·  " + ratios[ratio];
+            if (isGrok() && nsfw) summary += "  ·  NSFW";
+            paramSummaryText.setText(summary);
+        }
+        // 同步草稿文本框（如从灵感/作品详情回填时）
+        if (promptInput != null && !promptInput.getText().toString().equals(draft)) {
+            promptInput.setText(draft);
+            promptInput.setSelection(draft.length());
+        }
+        if (promptRefBtnLabel != null) {
+            promptRefBtnLabel.setText(reference == null ? "参考图" : "换参考图");
+        }
+        // 待取回任务条
+        if (homePendingSlot != null) {
+            homePendingSlot.removeAllViews();
+            if (service.hasPending() && !busy) {
+                LinearLayout banner = new LinearLayout(this);
+                banner.setOrientation(LinearLayout.HORIZONTAL);
+                banner.setGravity(Gravity.CENTER_VERTICAL);
+                banner.setBackground(UiKit.card(this, 0xF0EAF0FF, 0xFFC8DAFF, 18));
+                banner.setPadding(dp(12), dp(9), dp(10), dp(9));
+                banner.addView(UiKit.icon(this, R.drawable.ic_clock, 16, UiKit.BLUE));
 
-        LinearLayout iconBox = new LinearLayout(this);
-        iconBox.setGravity(Gravity.CENTER);
-        iconBox.setBackground(UiKit.round(this, UiKit.BLUE_SOFT, 11));
-        iconBox.addView(UiKit.icon(this, R.drawable.ic_shield, 17, UiKit.BLUE));
-        row.addView(iconBox, new LinearLayout.LayoutParams(dp(34), dp(34)));
+                TextView msg = UiKit.text(this, "上次作品仍在生成中", 12.5f, UiKit.INK, true);
+                LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(0, -2, 1);
+                mlp.leftMargin = dp(8);
+                banner.addView(msg, mlp);
 
-        LinearLayout texts = new LinearLayout(this);
-        texts.setOrientation(LinearLayout.VERTICAL);
-        texts.addView(UiKit.text(this, "允许 NSFW", 13.5f, UiKit.INK, true));
-        TextView sub = UiKit.text(this, "仅 Grok 支持 · 默认关闭", 11, UiKit.MUTED, false);
-        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
-        slp.topMargin = dp(2);
-        texts.addView(sub, slp);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1);
-        tlp.leftMargin = dp(10);
-        row.addView(texts, tlp);
+                TextView resume = UiKit.text(this, "继续获取", 12, Color.WHITE, true);
+                resume.setBackground(UiKit.round(this, UiKit.BLUE, 13));
+                resume.setPadding(dp(11), dp(6), dp(11), dp(6));
+                resume.setOnClickListener(v -> generate());
+                banner.addView(resume);
 
-        Switch toggle = new Switch(this);
-        toggle.setChecked(nsfw);
-        toggle.setOnCheckedChangeListener((b, checked) -> nsfw = checked);
-        row.addView(toggle);
-        row.setOnClickListener(v -> toggle.toggle());
-        return row;
+                LinearLayout drop = new LinearLayout(this);
+                drop.setGravity(Gravity.CENTER);
+                drop.setPadding(dp(8), dp(6), dp(4), dp(6));
+                drop.addView(UiKit.icon(this, R.drawable.ic_close, 15, UiKit.MUTED));
+                drop.setOnClickListener(v -> new AlertDialog.Builder(this)
+                        .setMessage("移除本机的取图记录？这不会取消服务端任务。")
+                        .setNegativeButton("返回", null)
+                        .setPositiveButton("移除", (d, w) -> { service.forget(); refreshHomeDynamic(); })
+                        .show());
+                banner.addView(drop);
+
+                LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
+                blp.topMargin = dp(12);
+                homePendingSlot.addView(banner, blp);
+            }
+        }
+        // 参考图贴纸条
+        if (homeRefSlot != null) {
+            homeRefSlot.removeAllViews();
+            if (reference != null) {
+                LinearLayout refChip = new LinearLayout(this);
+                refChip.setOrientation(LinearLayout.HORIZONTAL);
+                refChip.setGravity(Gravity.CENTER_VERTICAL);
+                refChip.setBackground(UiKit.card(this, 0xEEF2F6FC, 0xFFE2EBF7, 16));
+                refChip.setPadding(dp(8), dp(8), dp(10), dp(8));
+
+                ImageView thumb = new ImageView(this);
+                thumb.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                thumb.setBackground(UiKit.round(this, UiKit.SOFT, 11));
+                thumb.setClipToOutline(true);
+                loadReferenceThumb(thumb, reference);
+                refChip.addView(thumb, new LinearLayout.LayoutParams(dp(48), dp(48)));
+
+                LinearLayout info = new LinearLayout(this);
+                info.setOrientation(LinearLayout.VERTICAL);
+                info.addView(UiKit.text(this, "已附带参考图", 13, UiKit.INK, true));
+                TextView sub = UiKit.text(this, "大图将自动压缩，按描述进行图改图", 11, UiKit.MUTED, false);
+                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+                slp.topMargin = dp(2);
+                info.addView(sub, slp);
+                LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(0, -2, 1);
+                ilp.leftMargin = dp(10);
+                refChip.addView(info, ilp);
+
+                TextView swap = UiKit.text(this, "更换", 12, UiKit.BLUE, true);
+                swap.setBackground(UiKit.round(this, UiKit.BLUE_SOFT, 13));
+                swap.setPadding(dp(11), dp(6), dp(11), dp(6));
+                swap.setOnClickListener(v -> pickReference());
+                refChip.addView(swap);
+
+                LinearLayout remove = new LinearLayout(this);
+                remove.setGravity(Gravity.CENTER);
+                remove.setBackground(UiKit.round(this, UiKit.DANGER_SOFT, 15));
+                remove.addView(UiKit.icon(this, R.drawable.ic_close, 14, UiKit.DANGER));
+                remove.setOnClickListener(v -> { reference = null; refreshHomeDynamic(); });
+                LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(dp(30), dp(30));
+                rlp.leftMargin = dp(6);
+                refChip.addView(remove, rlp);
+
+                LinearLayout.LayoutParams refLp = new LinearLayout.LayoutParams(-1, -2);
+                refLp.bottomMargin = dp(10);
+                homeRefSlot.addView(refChip, refLp);
+            }
+        }
+        // 主按钮状态
+        if (ctaLabelView != null && ctaIconView != null) {
+            boolean pending = service.hasPending();
+            ctaIconView.setImageResource(reference == null ? R.drawable.ic_sparkles : R.drawable.ic_wand);
+            ctaLabelView.setText(busy ? "正在绘制中 · 查看进度"
+                    : pending ? "继续获取上次作品"
+                    : reference == null ? "生成图片" : "按描述修改参考图");
+        }
+        // 最近作品条
+        if (homeRecentSlot != null) {
+            homeRecentSlot.removeAllViews();
+            homeRecentSlot.addView(recentPhotosStrip());
+        }
     }
 
     private View recentPhotosStrip() {
         String[] ids = listLocalArtworkIds();
         if (ids.length == 0) {
-            return fullBleedLocalTile("", null, 148, "内置示例");
+            return fullBleedLocalTile("", null, 150, "内置示例");
         }
         File dir = new File(getFilesDir(), "images");
         LinearLayout row = new LinearLayout(this);
@@ -491,14 +808,14 @@ public final class MainActivity extends Activity {
         int count = Math.min(2, ids.length);
         for (int i = 0; i < count; i++) {
             String id = ids[i];
-            View tile = fullBleedLocalTile(id, new File(dir, id), 148, artworkBadge(id));
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(148), 1);
+            View tile = fullBleedLocalTile(id, new File(dir, id), 150, artworkBadge(id));
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(150), 1);
             if (i > 0) lp.leftMargin = dp(10);
             row.addView(tile, lp);
         }
         if (count == 1) {
-            View sample = fullBleedLocalTile("", null, 148, "内置示例");
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(148), 1);
+            View sample = fullBleedLocalTile("", null, 150, "内置示例");
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(150), 1);
             lp.leftMargin = dp(10);
             row.addView(sample, lp);
         }
@@ -507,11 +824,11 @@ public final class MainActivity extends Activity {
 
     private FrameLayout fullBleedLocalTile(String id, File file, int heightDp, String badgeText) {
         FrameLayout tile = new FrameLayout(this);
-        tile.setBackground(UiKit.round(this, UiKit.SOFT, 22));
+        tile.setBackground(UiKit.round(this, UiKit.SOFT, 20));
         tile.setClipToOutline(true);
-        UiKit.applySoftShadow(tile, this, 6, 0x2A182638);
+        UiKit.applySoftShadow(tile, this, 5, 0x26182638);
         tile.setFocusable(true);
-        tile.setOnClickListener(v -> detail(id));
+        tile.setOnClickListener(v -> openDetailOverlay(id));
 
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -531,7 +848,6 @@ public final class MainActivity extends Activity {
     }
 
     private void loadReferenceThumb(ImageView view, Uri uri) {
-        Handler main = new Handler(Looper.getMainLooper());
         new Thread(() -> {
             try {
                 BitmapFactory.Options o = new BitmapFactory.Options();
@@ -549,28 +865,880 @@ public final class MainActivity extends Activity {
                     if (in == null) return;
                     bmp = BitmapFactory.decodeStream(in, null, o);
                 }
-                if (bmp != null) main.post(() -> view.setImageBitmap(bmp));
+                if (bmp != null) uiHandler.post(() -> view.setImageBitmap(bmp));
             } catch (Exception ignored) { }
         }, "jianyu-ref-thumb").start();
     }
 
-    // ==================== 03 浅色虹彩动态光球 · 生成中 ====================
+    // ==================== 创作参数底部面板（iOS Bottom Sheet） ====================
 
-    private void loading() {
-        layout("loading", true);
+    private void showParameterSheet() {
+        hideKeyboard();
+        FrameLayout wrapper = new FrameLayout(this);
+        wrapper.setPadding(dp(12), dp(12), dp(12), dp(12));
+
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setBackground(UiKit.floatingPillBg(this, 30));
+        UiKit.applySoftShadow(sheet, this, 18, 0x40182638);
+        sheet.setPadding(dp(20), dp(12), dp(20), dp(18));
+
+        View handle = new View(this);
+        handle.setBackground(UiKit.round(this, 0xFFCBD5E1, 3));
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(dp(38), dp(4));
+        hlp.gravity = Gravity.CENTER_HORIZONTAL;
+        sheet.addView(handle, hlp);
+
+        TextView heading = UiKit.text(this, "生成参数", 18, UiKit.INK, true);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
+        tlp.topMargin = dp(14);
+        sheet.addView(heading, tlp);
+
+        LinearLayout contentSlot = new LinearLayout(this);
+        contentSlot.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-1, -2);
+        clp.topMargin = dp(14);
+        sheet.addView(contentSlot, clp);
+
+        wrapper.addView(sheet, new FrameLayout.LayoutParams(-1, -2));
+        AlertDialog dialog = createBottomSheetDialog(wrapper);
+
+        Runnable rebuild = new Runnable() {
+            @Override public void run() {
+                contentSlot.removeAllViews();
+
+                contentSlot.addView(UiKit.text(MainActivity.this, "模型引擎", 12.5f, UiKit.MUTED, true));
+                LinearLayout seg = UiKit.segmentedControl(MainActivity.this, models, model, idx -> {
+                    if (model != idx) {
+                        model = idx;
+                        refreshHomeDynamic();
+                        run();
+                    }
+                });
+                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
+                slp.topMargin = dp(8);
+                contentSlot.addView(seg, slp);
+
+                TextView rTitle = UiKit.text(MainActivity.this, "画面比例", 12.5f, UiKit.MUTED, true);
+                LinearLayout.LayoutParams rtlp = new LinearLayout.LayoutParams(-2, -2);
+                rtlp.topMargin = dp(16);
+                contentSlot.addView(rTitle, rtlp);
+
+                LinearLayout ratioRow = new LinearLayout(MainActivity.this);
+                ratioRow.setOrientation(LinearLayout.HORIZONTAL);
+                for (int i = 0; i < ratios.length; i++) {
+                    final int idx = i;
+                    LinearLayout card = UiKit.ratioCard(MainActivity.this, ratios[i], idx == ratio, () -> {
+                        if (ratio != idx) {
+                            ratio = idx;
+                            refreshHomeDynamic();
+                            run();
+                        }
+                    });
+                    LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, -2, 1);
+                    if (i > 0) rlp.leftMargin = dp(7);
+                    ratioRow.addView(card, rlp);
+                }
+                LinearLayout.LayoutParams rrlp = new LinearLayout.LayoutParams(-1, -2);
+                rrlp.topMargin = dp(8);
+                contentSlot.addView(ratioRow, rrlp);
+
+                if (isGrok()) {
+                    LinearLayout nsfwRow = new LinearLayout(MainActivity.this);
+                    nsfwRow.setOrientation(LinearLayout.HORIZONTAL);
+                    nsfwRow.setGravity(Gravity.CENTER_VERTICAL);
+                    nsfwRow.setBackground(UiKit.card(MainActivity.this, 0xFFF3F6FC, 0xFFE4ECF6, 18));
+                    nsfwRow.setPadding(dp(12), dp(10), dp(12), dp(10));
+                    nsfwRow.setFocusable(true);
+
+                    LinearLayout iconBox = new LinearLayout(MainActivity.this);
+                    iconBox.setGravity(Gravity.CENTER);
+                    iconBox.setBackground(UiKit.round(MainActivity.this, UiKit.BLUE_SOFT, 11));
+                    iconBox.addView(UiKit.icon(MainActivity.this, R.drawable.ic_shield, 17, UiKit.BLUE));
+                    nsfwRow.addView(iconBox, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+                    LinearLayout texts = new LinearLayout(MainActivity.this);
+                    texts.setOrientation(LinearLayout.VERTICAL);
+                    texts.addView(UiKit.text(MainActivity.this, "允许 NSFW", 13.5f, UiKit.INK, true));
+                    texts.addView(UiKit.text(MainActivity.this, "仅 Grok 支持 · 默认关闭", 11, UiKit.MUTED, false));
+                    LinearLayout.LayoutParams txlp = new LinearLayout.LayoutParams(0, -2, 1);
+                    txlp.leftMargin = dp(10);
+                    nsfwRow.addView(texts, txlp);
+
+                    Switch toggle = new Switch(MainActivity.this);
+                    toggle.setChecked(nsfw);
+                    toggle.setOnCheckedChangeListener((b, checked) -> {
+                        nsfw = checked;
+                        refreshHomeDynamic();
+                    });
+                    nsfwRow.addView(toggle);
+                    nsfwRow.setOnClickListener(v -> toggle.toggle());
+
+                    LinearLayout.LayoutParams nlp = new LinearLayout.LayoutParams(-1, -2);
+                    nlp.topMargin = dp(14);
+                    contentSlot.addView(nsfwRow, nlp);
+                }
+            }
+        };
+        rebuild.run();
+
+        LinearLayout doneBtn = UiKit.prismButton(this, 0, "完成", dialog::dismiss);
+        LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(-1, dp(48));
+        dlp.topMargin = dp(18);
+        sheet.addView(doneBtn, dlp);
+
+        dialog.show();
+    }
+
+    // ==================== 设置底部面板（版本检查更新 / 安全浏览 / 清理缓存） ====================
+
+    private void showSettingsSheet() {
+        hideKeyboard();
+        FrameLayout wrapper = new FrameLayout(this);
+        wrapper.setPadding(dp(12), dp(12), dp(12), dp(12));
+
+        LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setBackground(UiKit.floatingPillBg(this, 30));
+        UiKit.applySoftShadow(sheet, this, 18, 0x40182638);
+        sheet.setPadding(dp(20), dp(12), dp(20), dp(18));
+
+        View handle = new View(this);
+        handle.setBackground(UiKit.round(this, 0xFFCBD5E1, 3));
+        LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(dp(38), dp(4));
+        hlp.gravity = Gravity.CENTER_HORIZONTAL;
+        sheet.addView(handle, hlp);
+
+        // 顶部品牌识别行
+        LinearLayout brandRow = new LinearLayout(this);
+        brandRow.setOrientation(LinearLayout.HORIZONTAL);
+        brandRow.setGravity(Gravity.CENTER_VERTICAL);
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.logo);
+        brandRow.addView(logo, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        LinearLayout brandTexts = new LinearLayout(this);
+        brandTexts.setOrientation(LinearLayout.VERTICAL);
+        brandTexts.addView(UiKit.text(this, "见屿 · 设置", 17, UiKit.INK, true));
+        brandTexts.addView(UiKit.text(this, "当前版本 v" + BuildConfig.VERSION_NAME, 12, UiKit.MUTED, false));
+        LinearLayout.LayoutParams btlp = new LinearLayout.LayoutParams(0, -2, 1);
+        btlp.leftMargin = dp(12);
+        brandRow.addView(brandTexts, btlp);
+        LinearLayout.LayoutParams brlp = new LinearLayout.LayoutParams(-1, -2);
+        brlp.topMargin = dp(14);
+        sheet.addView(brandRow, brlp);
+
+        wrapper.addView(sheet, new FrameLayout.LayoutParams(-1, -2));
+        AlertDialog dialog = createBottomSheetDialog(wrapper);
+
+        // 1. 版本与检查更新
+        LinearLayout updateRow = settingsItemRow(
+                R.drawable.ic_refresh,
+                "检查更新",
+                availableUpdate != null && availableUpdate.hasUpdate
+                        ? "发现新版本 v" + availableUpdate.latestVersion
+                        : "当前 v" + BuildConfig.VERSION_NAME + " · 支持应用内直装",
+                null);
+        TextView updateAction = UiKit.softBadge(
+                this,
+                availableUpdate != null && availableUpdate.hasUpdate ? "立即更新" : "检查 ›",
+                availableUpdate != null && availableUpdate.hasUpdate ? UiKit.BLUE : UiKit.BLUE_SOFT,
+                availableUpdate != null && availableUpdate.hasUpdate ? Color.WHITE : UiKit.BLUE);
+        updateRow.addView(updateAction);
+        updateRow.setOnClickListener(v -> {
+            dialog.dismiss();
+            if (availableUpdate != null && availableUpdate.hasUpdate) showUpdateDialog(availableUpdate);
+            else checkUpdate(false);
+        });
+        LinearLayout.LayoutParams urlp = new LinearLayout.LayoutParams(-1, -2);
+        urlp.topMargin = dp(16);
+        sheet.addView(updateRow, urlp);
+
+        // 2. 安全浏览开关（折叠敏感灵感缩略图）
+        Switch safeSwitch = new Switch(this);
+        safeSwitch.setChecked(safeBrowse);
+        safeSwitch.setOnCheckedChangeListener((b, checked) -> {
+            safeBrowse = checked;
+            prefs.edit().putBoolean(KEY_SAFE_BROWSE, checked).apply();
+            if (inspirationAdapter != null) {
+                inspirationAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+            }
+        });
+        LinearLayout safeRow = settingsItemRow(
+                R.drawable.ic_shield,
+                "安全浏览",
+                "在灵感瀑布流中默认折叠敏感预览图",
+                safeSwitch);
+        safeRow.setOnClickListener(v -> safeSwitch.toggle());
+        LinearLayout.LayoutParams srlp = new LinearLayout.LayoutParams(-1, -2);
+        srlp.topMargin = dp(10);
+        sheet.addView(safeRow, srlp);
+
+        // 3. 缓存管理
+        TextView cacheSub = UiKit.text(this, "正在计算缓存占用…", 11.5f, UiKit.MUTED, false);
+        TextView clearBadge = UiKit.softBadge(this, "清理", UiKit.SOFT, UiKit.INK);
+        LinearLayout cacheRow = settingsItemRowWithSubView(R.drawable.ic_trash, "图片与画廊缓存", cacheSub, clearBadge);
+        new Thread(() -> {
+            long bytes = service.cacheSizeBytes();
+            String formatted = formatBytes(bytes);
+            uiHandler.post(() -> cacheSub.setText("已占用 " + formatted + "（不影响本机作品库）"));
+        }, "jianyu-cache-size").start();
+        cacheRow.setOnClickListener(v -> {
+            new Thread(() -> {
+                service.clearAllCaches();
+                galleryData = null;
+                uiHandler.post(() -> {
+                    builtMajorsSignature = "";
+                    cacheSub.setText("已占用 0 KB（已清理完成）");
+                    Toast.makeText(this, "缓存已清理", Toast.LENGTH_SHORT).show();
+                });
+            }, "jianyu-cache-clear").start();
+        });
+        LinearLayout.LayoutParams crlp = new LinearLayout.LayoutParams(-1, -2);
+        crlp.topMargin = dp(10);
+        sheet.addView(cacheRow, crlp);
+
+        TextView about = UiKit.text(this, "作品均保存在本机，支持一键保存至系统相册与分享。", 11.5f, UiKit.MUTED, false);
+        about.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams alp = new LinearLayout.LayoutParams(-1, -2);
+        alp.topMargin = dp(16);
+        sheet.addView(about, alp);
+
+        dialog.show();
+    }
+
+    private LinearLayout settingsItemRow(int iconRes, String title, String subtitle, View trailing) {
+        TextView sub = UiKit.text(this, subtitle, 11.5f, UiKit.MUTED, false);
+        return settingsItemRowWithSubView(iconRes, title, sub, trailing);
+    }
+
+    private LinearLayout settingsItemRowWithSubView(int iconRes, String title, TextView subView, View trailing) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setBackground(UiKit.card(this, 0xFFF4F7FC, 0xFFE6EEF8, 18));
+        row.setPadding(dp(12), dp(11), dp(12), dp(11));
+        row.setMinimumHeight(dp(56));
+        row.setFocusable(true);
+
+        LinearLayout iconBox = new LinearLayout(this);
+        iconBox.setGravity(Gravity.CENTER);
+        iconBox.setBackground(UiKit.round(this, UiKit.BLUE_SOFT, 11));
+        iconBox.addView(UiKit.icon(this, iconRes, 17, UiKit.BLUE));
+        row.addView(iconBox, new LinearLayout.LayoutParams(dp(34), dp(34)));
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        texts.addView(UiKit.text(this, title, 14, UiKit.INK, true));
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+        slp.topMargin = dp(2);
+        texts.addView(subView, slp);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1);
+        tlp.leftMargin = dp(10);
+        row.addView(texts, tlp);
+
+        if (trailing != null) row.addView(trailing);
+        return row;
+    }
+
+    private AlertDialog createBottomSheetDialog(View content) {
+        AlertDialog dialog = new AlertDialog.Builder(this).setView(content).create();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setGravity(Gravity.BOTTOM);
+            window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT);
+        }
+        return dialog;
+    }
+
+    // ==================== Tab 1: 灵感频道（RecyclerView + 下拉刷新 + 自动分页 + 收藏） ====================
+
+    private View buildInspireTab() {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout headerPad = new LinearLayout(this);
+        headerPad.setOrientation(LinearLayout.VERTICAL);
+        headerPad.setPadding(dp(18), dp(14), dp(18), dp(8));
+
+        // 去掉重复的品牌眉标，采用苹果原生大标题「灵感」
+        headerPad.addView(UiKit.pageTitleHeader(this, "灵感", null, null));
+
+        inspireSegHolder = new LinearLayout(this);
+        inspireSegHolder.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams shlp = new LinearLayout.LayoutParams(-1, -2);
+        shlp.topMargin = dp(12);
+        headerPad.addView(inspireSegHolder, shlp);
+
+        // 提示词画廊专属工具栏（持久化搜索栏 + 清洗后的分类胶囊）
+        galleryToolsBox = new LinearLayout(this);
+        galleryToolsBox.setOrientation(LinearLayout.VERTICAL);
+        galleryToolsBox.setVisibility(View.GONE);
+
+        LinearLayout searchBar = new LinearLayout(this);
+        searchBar.setOrientation(LinearLayout.HORIZONTAL);
+        searchBar.setGravity(Gravity.CENTER_VERTICAL);
+        searchBar.setBackground(UiKit.liquidGlass(this, 24));
+        UiKit.applySoftShadow(searchBar, this, 4, 0x1A182638);
+        searchBar.setPadding(dp(14), dp(4), dp(8), dp(4));
+        searchBar.addView(UiKit.icon(this, R.drawable.ic_search, 16, UiKit.MUTED));
+
+        gallerySearchInput = new EditText(this);
+        gallerySearchInput.setSingleLine(true);
+        gallerySearchInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        gallerySearchInput.setBackground(null);
+        gallerySearchInput.setTextSize(13.5f);
+        gallerySearchInput.setTextColor(UiKit.INK);
+        gallerySearchInput.setHintTextColor(0xFF94A3B8);
+        gallerySearchInput.setHint("搜索 5,443 条提示词、风格、分类…");
+        gallerySearchInput.setText(galleryQuery);
+        gallerySearchInput.setOnEditorActionListener((v, actionId, event) -> {
+            applyGallerySearch();
+            return true;
+        });
+        gallerySearchInput.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
+            @Override public void afterTextChanged(Editable s) {
+                if (gallerySearchClear != null) {
+                    gallerySearchClear.setVisibility(s.length() > 0 ? View.VISIBLE : View.GONE);
+                }
+            }
+        });
+        LinearLayout.LayoutParams sip = new LinearLayout.LayoutParams(0, dp(38), 1);
+        sip.leftMargin = dp(8);
+        searchBar.addView(gallerySearchInput, sip);
+
+        LinearLayout clr = new LinearLayout(this);
+        clr.setGravity(Gravity.CENTER);
+        clr.setPadding(dp(8), dp(8), dp(8), dp(8));
+        clr.addView(UiKit.icon(this, R.drawable.ic_close, 14, UiKit.MUTED));
+        clr.setVisibility(galleryQuery.isEmpty() ? View.GONE : View.VISIBLE);
+        clr.setOnClickListener(v -> {
+            gallerySearchInput.setText("");
+            applyGallerySearch();
+        });
+        gallerySearchClear = clr;
+        searchBar.addView(clr);
+
+        TextView goBtn = UiKit.text(this, "搜索", 12, Color.WHITE, true);
+        goBtn.setBackground(UiKit.round(this, UiKit.BLUE, 15));
+        goBtn.setPadding(dp(12), dp(7), dp(12), dp(7));
+        goBtn.setOnClickListener(v -> applyGallerySearch());
+        searchBar.addView(goBtn);
+
+        LinearLayout.LayoutParams sblp = new LinearLayout.LayoutParams(-1, -2);
+        sblp.topMargin = dp(10);
+        galleryToolsBox.addView(searchBar, sblp);
+
+        HorizontalScrollView chipsScroll = new HorizontalScrollView(this);
+        chipsScroll.setHorizontalScrollBarEnabled(false);
+        galleryMajorsRow = new LinearLayout(this);
+        galleryMajorsRow.setOrientation(LinearLayout.HORIZONTAL);
+        chipsScroll.addView(galleryMajorsRow);
+        LinearLayout.LayoutParams cslp = new LinearLayout.LayoutParams(-1, -2);
+        cslp.topMargin = dp(10);
+        galleryToolsBox.addView(chipsScroll, cslp);
+
+        galleryCountLabel = UiKit.text(this, "", 11.5f, UiKit.MUTED, false);
+        LinearLayout.LayoutParams gclp = new LinearLayout.LayoutParams(-1, -2);
+        gclp.topMargin = dp(8);
+        galleryToolsBox.addView(galleryCountLabel, gclp);
+
+        headerPad.addView(galleryToolsBox, new LinearLayout.LayoutParams(-1, -2));
+        wrap.addView(headerPad, new LinearLayout.LayoutParams(-1, -2));
+
+        // 瀑布流内容区 + 下拉刷新 + 空态覆盖
+        FrameLayout body = new FrameLayout(this);
+        inspireSwipe = new SwipeRefreshLayout(this);
+        inspireSwipe.setColorSchemeColors(UiKit.BLUE);
+        inspireSwipe.setOnRefreshListener(() -> {
+            if (inspireSubTab == 0) fetchPlaza(true);
+            else if (inspireSubTab == 1) fetchGallery(true);
+            else {
+                refreshInspireTab(false);
+                inspireSwipe.setRefreshing(false);
+            }
+        });
+
+        inspireRecycler = new RecyclerView(this);
+        StaggeredGridLayoutManager sglm = new StaggeredGridLayoutManager(2, StaggeredGridLayoutManager.VERTICAL);
+        sglm.setGapStrategy(StaggeredGridLayoutManager.GAP_HANDLING_MOVE_ITEMS_BETWEEN_SPANS);
+        inspireRecycler.setLayoutManager(sglm);
+        inspireRecycler.setPadding(dp(13), dp(6), dp(13), dp(112));
+        inspireRecycler.setClipToPadding(false);
+        inspireRecycler.setItemAnimator(null);
+
+        inspirationAdapter = new GalleryAdapters.InspirationAdapter(this, new GalleryAdapters.InspirationListener() {
+            @Override public void onItemClick(InspirationRepository.Item item) {
+                openInspireDetailOverlay(item);
+            }
+            @Override public void onQuickSameClick(InspirationRepository.Item item) {
+                applyInspirationToHome(item);
+            }
+            @Override public void onFavoriteToggle(InspirationRepository.Item item) {
+                boolean added = InspirationRepository.toggleFavorite(MainActivity.this, item);
+                Toast.makeText(MainActivity.this, added ? "已加入灵感收藏" : "已取消收藏", Toast.LENGTH_SHORT).show();
+                if (inspireSubTab == 2) refreshInspireTab(false);
+                else inspirationAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+            }
+        });
+        inspireRecycler.setAdapter(inspirationAdapter);
+
+        // 触底自动分页加载
+        inspireRecycler.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override public void onScrolled(RecyclerView rv, int dx, int dy) {
+                if (dy <= 0) return;
+                StaggeredGridLayoutManager lm = (StaggeredGridLayoutManager) rv.getLayoutManager();
+                if (lm == null) return;
+                int[] lastPositions = lm.findLastVisibleItemPositions(null);
+                int maxLast = 0;
+                for (int p : lastPositions) if (p > maxLast) maxLast = p;
+                int total = inspirationAdapter.getItemCount();
+                if (total > 0 && maxLast >= total - 6) {
+                    if (inspireSubTab == 0 && plazaHasMore && !plazaLoading) {
+                        fetchPlaza(false);
+                    } else if (inspireSubTab == 1 && galleryData != null) {
+                        List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, galleryMajor, galleryQuery);
+                        if (galleryVisibleCount < filtered.size()) {
+                            galleryVisibleCount += GALLERY_PAGE_SIZE;
+                            bindGalleryToAdapter(filtered);
+                        }
+                    }
+                }
+            }
+        });
+
+        inspireSwipe.addView(inspireRecycler, new FrameLayout.LayoutParams(-1, -1));
+        body.addView(inspireSwipe, new FrameLayout.LayoutParams(-1, -1));
+
+        inspireStateBox = new FrameLayout(this);
+        inspireStateBox.setPadding(dp(18), dp(20), dp(18), dp(112));
+        inspireStateBox.setVisibility(View.GONE);
+        body.addView(inspireStateBox, new FrameLayout.LayoutParams(-1, -1));
+
+        wrap.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
+        rebuildInspireSwitcher();
+        return wrap;
+    }
+
+    private void rebuildInspireSwitcher() {
+        inspireSegHolder.removeAllViews();
+        inspireSegHolder.addView(UiKit.segmentedControl(this, new String[]{"创意广场", "提示词画廊", "收藏"}, inspireSubTab, idx -> {
+            if (inspireSubTab != idx) {
+                hideKeyboard();
+                inspireSubTab = idx;
+                rebuildInspireSwitcher();
+                refreshInspireTab(true);
+            }
+        }));
+    }
+
+    private void applyGallerySearch() {
+        hideKeyboard();
+        galleryQuery = gallerySearchInput.getText().toString().trim();
+        galleryVisibleCount = GALLERY_PAGE_SIZE;
+        refreshInspireTab(true);
+    }
+
+    private void refreshInspireTab(boolean scrollToTop) {
+        galleryToolsBox.setVisibility(inspireSubTab == 1 ? View.VISIBLE : View.GONE);
+        inspireStateBox.removeAllViews();
+        inspireStateBox.setVisibility(View.GONE);
+
+        if (inspireSubTab == 0) {
+            if (plazaItems.isEmpty() && !plazaLoading && plazaError.isEmpty()) {
+                fetchPlaza(true);
+                return;
+            }
+            if (plazaLoading && plazaItems.isEmpty()) {
+                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+                showStateIn(inspireStateBox, loadingHintCard("正在加载创意广场…"));
+                return;
+            }
+            if (!plazaError.isEmpty() && plazaItems.isEmpty()) {
+                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+                showStateIn(inspireStateBox, emptyCard("加载失败", plazaError, "重新加载", () -> fetchPlaza(true)));
+                return;
+            }
+            String footer = plazaLoading ? "正在加载更多灵感…" : (plazaHasMore ? "上滑自动加载更多" : "已经到底啦");
+            inspirationAdapter.setData(plazaItems, favoriteKeySet(), safeBrowse, footer);
+            if (scrollToTop) inspireRecycler.scrollToPosition(0);
+            return;
+        }
+
+        if (inspireSubTab == 1) {
+            if (galleryData == null && !galleryLoading && galleryError.isEmpty()) {
+                fetchGallery(false);
+                return;
+            }
+            if (galleryLoading && galleryData == null) {
+                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+                showStateIn(inspireStateBox, loadingHintCard("首次拉取 5,400+ 提示词画廊并缓存离线可用…"));
+                return;
+            }
+            if (!galleryError.isEmpty() && galleryData == null) {
+                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+                showStateIn(inspireStateBox, emptyCard("加载失败", galleryError, "重新加载", () -> fetchGallery(true)));
+                return;
+            }
+            rebuildGalleryMajorChips();
+            List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, galleryMajor, galleryQuery);
+            galleryCountLabel.setText("共 " + filtered.size() + " 条灵感 · 已缓存离线秒开");
+            if (filtered.isEmpty()) {
+                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+                showStateIn(inspireStateBox, emptyCard("没有找到匹配的提示词", "试试切换分类或换个关键词搜索。", "重置筛选", () -> {
+                    galleryMajor = "全部";
+                    galleryQuery = "";
+                    gallerySearchInput.setText("");
+                    galleryVisibleCount = GALLERY_PAGE_SIZE;
+                    refreshInspireTab(true);
+                }));
+                return;
+            }
+            bindGalleryToAdapter(filtered);
+            if (scrollToTop) inspireRecycler.scrollToPosition(0);
+            return;
+        }
+
+        // 收藏子页
+        List<InspirationRepository.Item> favs = InspirationRepository.getFavorites(this);
+        if (favs.isEmpty()) {
+            inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+            showStateIn(inspireStateBox, emptyCard("还没有收藏灵感", "在创意广场或提示词画廊点击右上角心形，即可随时收藏备用。", "去逛创意广场", () -> {
+                inspireSubTab = 0;
+                rebuildInspireSwitcher();
+                refreshInspireTab(true);
+            }));
+            return;
+        }
+        inspirationAdapter.setData(favs, favoriteKeySet(), safeBrowse, "共收藏 " + favs.size() + " 条灵感");
+        if (scrollToTop) inspireRecycler.scrollToPosition(0);
+    }
+
+    private void bindGalleryToAdapter(List<InspirationRepository.Item> filtered) {
+        int showCount = Math.min(galleryVisibleCount, filtered.size());
+        String footer = showCount < filtered.size()
+                ? "下滑自动加载更多（剩余 " + (filtered.size() - showCount) + " 条）"
+                : "已展示全部 " + filtered.size() + " 条灵感";
+        inspirationAdapter.setData(filtered.subList(0, showCount), favoriteKeySet(), safeBrowse, footer);
+    }
+
+    private void rebuildGalleryMajorChips() {
+        if (galleryData == null) return;
+        String sig = galleryMajor + "|" + galleryData.majors.size();
+        if (sig.equals(builtMajorsSignature)) return;
+        builtMajorsSignature = sig;
+        galleryMajorsRow.removeAllViews();
+        for (int i = 0; i < galleryData.majors.size(); i++) {
+            String major = galleryData.majors.get(i);
+            TextView chip = UiKit.chip(this, major, major.equals(galleryMajor), () -> {
+                if (!major.equals(galleryMajor)) {
+                    galleryMajor = major;
+                    galleryVisibleCount = GALLERY_PAGE_SIZE;
+                    builtMajorsSignature = "";
+                    refreshInspireTab(true);
+                }
+            });
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
+            if (i > 0) clp.leftMargin = dp(7);
+            galleryMajorsRow.addView(chip, clp);
+        }
+    }
+
+    private Set<String> favoriteKeySet() {
+        Set<String> keys = new HashSet<>();
+        for (InspirationRepository.Item item : InspirationRepository.getFavorites(this)) {
+            keys.add(item.uniqueKey());
+        }
+        return keys;
+    }
+
+    private void showStateIn(FrameLayout container, View card) {
+        container.removeAllViews();
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-1, -2);
+        lp.gravity = Gravity.TOP;
+        container.addView(card, lp);
+        container.setVisibility(View.VISIBLE);
+    }
+
+    private void fetchPlaza(boolean reset) {
+        if (plazaLoading) return;
+        plazaLoading = true;
+        plazaError = "";
+        int nextPage = reset ? 1 : plazaPage + 1;
+        if (reset) {
+            plazaItems.clear();
+            plazaPage = 0;
+            plazaHasMore = true;
+        }
+        if (activeTab == 1 && inspireSubTab == 0) {
+            if (plazaItems.isEmpty()) refreshInspireTab(false);
+            else inspirationAdapter.setFooterText("正在加载更多灵感…");
+        }
+        new Thread(() -> {
+            try {
+                InspirationRepository.PageResult result = InspirationRepository.fetchPlazaPage(nextPage, PLAZA_PAGE_SIZE);
+                uiHandler.post(() -> {
+                    plazaLoading = false;
+                    plazaPage = nextPage;
+                    plazaHasMore = result.hasMore;
+                    plazaItems.addAll(result.items);
+                    MainActivity act = visible;
+                    if (act != null) {
+                        act.inspireSwipe.setRefreshing(false);
+                        if (act.activeTab == 1 && act.inspireSubTab == 0) act.refreshInspireTab(false);
+                    }
+                });
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "创意广场加载失败，请检查网络。" : e.getMessage();
+                uiHandler.post(() -> {
+                    plazaLoading = false;
+                    plazaError = msg;
+                    MainActivity act = visible;
+                    if (act != null) {
+                        act.inspireSwipe.setRefreshing(false);
+                        if (act.activeTab == 1 && act.inspireSubTab == 0) act.refreshInspireTab(false);
+                    }
+                });
+            }
+        }, "jianyu-plaza").start();
+    }
+
+    private void fetchGallery(boolean forceRefresh) {
+        if (galleryLoading) return;
+        galleryLoading = true;
+        galleryError = "";
+        if (forceRefresh) {
+            galleryData = null;
+            builtMajorsSignature = "";
+        }
+        if (activeTab == 1 && inspireSubTab == 1) refreshInspireTab(false);
+        Context appContext = getApplicationContext();
+        new Thread(() -> {
+            try {
+                InspirationRepository.GalleryData data = InspirationRepository.loadGallery(appContext, forceRefresh);
+                uiHandler.post(() -> {
+                    galleryLoading = false;
+                    galleryData = data;
+                    MainActivity act = visible;
+                    if (act != null) {
+                        act.inspireSwipe.setRefreshing(false);
+                        if (act.activeTab == 1 && act.inspireSubTab == 1) act.refreshInspireTab(false);
+                    }
+                });
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "提示词画廊加载失败，请检查网络。" : e.getMessage();
+                uiHandler.post(() -> {
+                    galleryLoading = false;
+                    galleryError = msg;
+                    MainActivity act = visible;
+                    if (act != null) {
+                        act.inspireSwipe.setRefreshing(false);
+                        if (act.activeTab == 1 && act.inspireSubTab == 1) act.refreshInspireTab(false);
+                    }
+                });
+            }
+        }, "jianyu-gallery").start();
+    }
+
+    // ==================== Tab 2: 作品库（原生大标题 + RecyclerView 瀑布流 + 批量多选删除） ====================
+
+    private View buildLibraryTab() {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout headerPad = new LinearLayout(this);
+        headerPad.setOrientation(LinearLayout.VERTICAL);
+        headerPad.setPadding(dp(18), dp(14), dp(18), dp(8));
+
+        librarySelectBtn = UiKit.text(this, "选择", 13, UiKit.BLUE, true);
+        librarySelectBtn.setBackground(UiKit.floatingPillBg(this, 18));
+        UiKit.applySoftShadow(librarySelectBtn, this, 3, 0x1E182638);
+        librarySelectBtn.setPadding(dp(15), dp(8), dp(15), dp(8));
+        librarySelectBtn.setMinimumHeight(dp(38));
+        librarySelectBtn.setGravity(Gravity.CENTER);
+        librarySelectBtn.setOnClickListener(v -> {
+            if (librarySelectMode) exitLibrarySelectMode();
+            else enterLibrarySelectMode(null);
+        });
+
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout titleLeft = new LinearLayout(this);
+        titleLeft.setOrientation(LinearLayout.VERTICAL);
+        titleLeft.addView(UiKit.text(this, "作品库", 29, UiKit.INK, true));
+        librarySubtitleView = UiKit.text(this, "0 幅本机作品", 12, UiKit.MUTED, false);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
+        slp.topMargin = dp(2);
+        titleLeft.addView(librarySubtitleView, slp);
+        titleRow.addView(titleLeft, new LinearLayout.LayoutParams(0, -2, 1));
+        titleRow.addView(librarySelectBtn);
+        headerPad.addView(titleRow);
+
+        libraryFilterRow = new LinearLayout(this);
+        libraryFilterRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(-1, -2);
+        flp.topMargin = dp(12);
+        headerPad.addView(libraryFilterRow, flp);
+        wrap.addView(headerPad, new LinearLayout.LayoutParams(-1, -2));
+
+        FrameLayout body = new FrameLayout(this);
+        libraryRecycler = new RecyclerView(this);
+        StaggeredGridLayoutManager sglm = new StaggeredGridLayoutManager(2, StaggeredGridLayoutManager.VERTICAL);
+        sglm.setGapStrategy(StaggeredGridLayoutManager.GAP_HANDLING_MOVE_ITEMS_BETWEEN_SPANS);
+        libraryRecycler.setLayoutManager(sglm);
+        libraryRecycler.setPadding(dp(13), dp(6), dp(13), dp(112));
+        libraryRecycler.setClipToPadding(false);
+        libraryRecycler.setItemAnimator(null);
+
+        libraryAdapter = new GalleryAdapters.LocalLibraryAdapter(this, service, new GalleryAdapters.LocalArtworkListener() {
+            @Override public void onArtworkClick(String id) {
+                if (librarySelectMode) {
+                    if (librarySelected.contains(id)) librarySelected.remove(id);
+                    else librarySelected.add(id);
+                    refreshLibraryContent();
+                } else {
+                    openDetailOverlay(id);
+                }
+            }
+
+            @Override public void onArtworkLongClick(String id) {
+                enterLibrarySelectMode(id);
+            }
+        });
+        libraryRecycler.setAdapter(libraryAdapter);
+        body.addView(libraryRecycler, new FrameLayout.LayoutParams(-1, -1));
+
+        libraryEmptyBox = new FrameLayout(this);
+        libraryEmptyBox.setPadding(dp(18), dp(20), dp(18), dp(112));
+        libraryEmptyBox.setVisibility(View.GONE);
+        body.addView(libraryEmptyBox, new FrameLayout.LayoutParams(-1, -1));
+
+        wrap.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
+        return wrap;
+    }
+
+    private List<String> filteredLibraryIds() {
+        String[] allIds = listLocalArtworkIds();
+        List<String> out = new ArrayList<>();
+        for (String id : allIds) {
+            if (libraryFilter == 0) out.add(id);
+            else {
+                String m = service.modelLabel(id);
+                if (libraryFilter == 1 && "GPT".equals(m)) out.add(id);
+                else if (libraryFilter == 2 && "Grok".equals(m)) out.add(id);
+            }
+        }
+        return out;
+    }
+
+    private void refreshLibraryContent() {
+        if (libraryFilterRow == null || libraryAdapter == null) return;
+        String[] allIds = listLocalArtworkIds();
+        librarySubtitleView.setText(allIds.length + " 幅本机作品 · 长按可多选管理");
+        librarySelectBtn.setVisibility(allIds.length > 0 ? View.VISIBLE : View.GONE);
+        librarySelectBtn.setText(librarySelectMode ? "完成" : "选择");
+
+        libraryFilterRow.removeAllViews();
+        String[] filters = {"全部", "GPT", "Grok"};
+        for (int i = 0; i < filters.length; i++) {
+            final int idx = i;
+            TextView chip = UiKit.chip(this, filters[i], idx == libraryFilter, () -> {
+                if (libraryFilter != idx) {
+                    libraryFilter = idx;
+                    refreshLibraryContent();
+                }
+            });
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
+            if (i > 0) clp.leftMargin = dp(8);
+            libraryFilterRow.addView(chip, clp);
+        }
+
+        List<String> filtered = filteredLibraryIds();
+        librarySelected.retainAll(filtered);
+        libraryBatchCount.setText("已选 " + librarySelected.size() + " 项");
+
+        if (filtered.isEmpty()) {
+            libraryAdapter.setData(Collections.emptyList(), false, Collections.emptySet());
+            String title = allIds.length == 0 ? "作品库还是空的" : "该筛选下暂无作品";
+            String desc = allIds.length == 0
+                    ? "生成的图片会自动保存在本机，随时可欣赏、直存相册或再创作。"
+                    : "切换到「全部」查看已有作品，或去创作一幅新图。";
+            showStateIn(libraryEmptyBox, emptyCard(title, desc, "开始创作", () -> switchTab(0)));
+        } else {
+            libraryEmptyBox.setVisibility(View.GONE);
+            libraryAdapter.setData(filtered, librarySelectMode, librarySelected);
+        }
+        updateFloatingBarsVisibility();
+    }
+
+    private void enterLibrarySelectMode(String initialId) {
+        librarySelectMode = true;
+        librarySelected.clear();
+        if (initialId != null && !initialId.isEmpty()) librarySelected.add(initialId);
+        refreshLibraryContent();
+    }
+
+    private void exitLibrarySelectMode() {
+        librarySelectMode = false;
+        librarySelected.clear();
+        refreshLibraryContent();
+    }
+
+    private void toggleSelectAllLibrary() {
+        List<String> visibleIds = filteredLibraryIds();
+        if (librarySelected.size() >= visibleIds.size()) librarySelected.clear();
+        else librarySelected.addAll(visibleIds);
+        refreshLibraryContent();
+    }
+
+    private void confirmBatchDelete() {
+        if (librarySelected.isEmpty()) {
+            Toast.makeText(this, "请先勾选要删除的作品", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        int count = librarySelected.size();
+        new AlertDialog.Builder(this)
+                .setTitle("批量删除作品")
+                .setMessage("确定从本机作品库删除选中的 " + count + " 幅作品吗？")
+                .setNegativeButton("取消", null)
+                .setPositiveButton("删除", (d, w) -> {
+                    for (String id : new ArrayList<>(librarySelected)) {
+                        service.deleteArtwork(id);
+                    }
+                    exitLibrarySelectMode();
+                    refreshHomeDynamic();
+                    Toast.makeText(this, "已删除 " + count + " 幅作品", Toast.LENGTH_SHORT).show();
+                }).show();
+    }
+
+    // ==================== 二级页面 1：生成中动态光球（可最小化 + 可主动取消等待） ====================
+
+    private void openLoadingOverlay() {
+        if (isOverlayOpen("loading")) return;
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setBackground(UiKit.auroraCanvasBg(this));
+
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(18), dp(14), dp(18), dp(28));
+        scroll.addView(page, new FrameLayout.LayoutParams(-1, -2));
 
         LinearLayout topBar = new LinearLayout(this);
         topBar.setOrientation(LinearLayout.HORIZONTAL);
         topBar.setGravity(Gravity.CENTER_VERTICAL);
-        topBar.addView(UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::onBackPressed),
-                new LinearLayout.LayoutParams(dp(40), dp(40)));
-        TextView title = UiKit.text(this, service.hasPending() ? "正在获取作品" : "正在创作", 16, UiKit.INK, true);
+        topBar.addView(UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::popOverlay),
+                new LinearLayout.LayoutParams(dp(44), dp(44)));
+        TextView title = UiKit.text(this, service.hasPending() ? "正在获取作品" : "正在创作", 16.5f, UiKit.INK, true);
         title.setGravity(Gravity.CENTER);
         topBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
-        topBar.addView(new View(this), new LinearLayout.LayoutParams(dp(40), dp(1)));
-        add(topBar, -2, 0);
+        topBar.addView(new View(this), new LinearLayout.LayoutParams(dp(44), dp(1)));
+        page.addView(topBar);
 
-        // Apple Image Playground 浅色动态虹彩玻璃光球
         LinearLayout orbHolder = new LinearLayout(this);
         orbHolder.setOrientation(LinearLayout.VERTICAL);
         orbHolder.setGravity(Gravity.CENTER_HORIZONTAL);
@@ -582,13 +1750,16 @@ public final class MainActivity extends Activity {
         slp.topMargin = dp(4);
         orbHolder.addView(status, slp);
 
-        TextView sub = UiKit.text(this, "离开此页也会自动存入作品库", 13, UiKit.MUTED, false);
-        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-2, -2);
-        subLp.topMargin = dp(6);
-        orbHolder.addView(sub, subLp);
-        add(orbHolder, -2, 12);
+        long sec = Math.max(1L, (System.currentTimeMillis() - genStartMillis) / 1000L);
+        loadingTimerView = UiKit.text(this, "已等待 " + sec + " 秒 · 离开此页也会自动存入作品库", 13, UiKit.MUTED, false);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
+        tlp.topMargin = dp(6);
+        orbHolder.addView(loadingTimerView, tlp);
 
-        // 本次创作摘要毛玻璃卡
+        LinearLayout.LayoutParams ohlp = new LinearLayout.LayoutParams(-1, -2);
+        ohlp.topMargin = dp(12);
+        page.addView(orbHolder, ohlp);
+
         String summaryPrompt = !activePrompt.isEmpty() ? activePrompt : draft.trim();
         if (!summaryPrompt.isEmpty()) {
             LinearLayout card = new LinearLayout(this);
@@ -608,8 +1779,8 @@ public final class MainActivity extends Activity {
 
             LinearLayout tags = new LinearLayout(this);
             tags.setOrientation(LinearLayout.HORIZONTAL);
-            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
-            tlp.topMargin = dp(10);
+            LinearLayout.LayoutParams tagLp = new LinearLayout.LayoutParams(-2, -2);
+            tagLp.topMargin = dp(10);
             String m = !activeModel.isEmpty() ? activeModel : models[model];
             String r = !activeRatio.isEmpty() ? activeRatio : ratios[ratio];
             tags.addView(UiKit.softBadge(this, m, UiKit.BLUE_SOFT, UiKit.BLUE));
@@ -623,648 +1794,100 @@ public final class MainActivity extends Activity {
                 fbp.leftMargin = dp(6);
                 tags.addView(refBadge, fbp);
             }
-            card.addView(tags, tlp);
-            add(card, -2, 18);
+            card.addView(tags, tagLp);
+
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-1, -2);
+            clp.topMargin = dp(18);
+            page.addView(card, clp);
         }
 
-        LinearLayout navBtns = new LinearLayout(this);
-        navBtns.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout goInspire = UiKit.glassButton(this, R.drawable.ic_compass, "逛逛灵感", UiKit.GLASS_STRONG, UiKit.BLUE, this::inspire);
-        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(46), 1);
+        LinearLayout actionRow = new LinearLayout(this);
+        actionRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout bgBtn = UiKit.glassButton(this, R.drawable.ic_compass, "后台继续", UiKit.GLASS_STRONG, UiKit.BLUE, () -> {
+            popOverlay();
+            Toast.makeText(this, "已切到后台继续生成，可随时点底部胶囊查看", Toast.LENGTH_SHORT).show();
+        });
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(48), 1);
         lp1.rightMargin = dp(6);
-        navBtns.addView(goInspire, lp1);
+        actionRow.addView(bgBtn, lp1);
 
-        LinearLayout goLib = UiKit.glassButton(this, R.drawable.ic_images, "查看作品库", UiKit.GLASS_STRONG, UiKit.INK, this::library);
-        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(46), 1);
+        LinearLayout cancelBtn = UiKit.glassButton(this, R.drawable.ic_close, "取消等待", 0xF0FFF0F0, UiKit.DANGER, () ->
+                new AlertDialog.Builder(this)
+                        .setTitle("取消本次等待")
+                        .setMessage("中断当前连接并返回创作页？若服务端已生成完成，稍后仍可点击“继续获取”。")
+                        .setNegativeButton("继续等待", null)
+                        .setPositiveButton("中断等待", (d, w) -> {
+                            activeGenSeq++;
+                            service.cancelActive();
+                            busy = false;
+                            uiHandler.removeCallbacks(genTimerTick);
+                            popOverlaysByTag("loading");
+                            refreshHomeDynamic();
+                            updateFloatingBarsVisibility();
+                            Toast.makeText(this, "已取消等待", Toast.LENGTH_SHORT).show();
+                        }).show());
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(48), 1);
         lp2.leftMargin = dp(6);
-        navBtns.addView(goLib, lp2);
-        add(navBtns, -2, 14);
+        actionRow.addView(cancelBtn, lp2);
+
+        LinearLayout.LayoutParams arlp = new LinearLayout.LayoutParams(-1, -2);
+        arlp.topMargin = dp(16);
+        page.addView(actionRow, arlp);
+
+        pushOverlay("loading", scroll);
     }
 
-    // ==================== 04 & 05 灵感频道（创意广场 + 提示词画廊） ====================
+    // ==================== 二级页面 2：本机作品详情（全屏缩放 + 一键直存相册 + 分享 + 元数据） ====================
 
-    private void inspire() {
-        layout("inspire", true);
-
-        LinearLayout refreshBtn = UiKit.circleIconBtn(this, R.drawable.ic_refresh, UiKit.BLUE, UiKit.GLASS_STRONG, () -> {
-            if (inspireTab == 0) fetchPlaza(true);
-            else fetchGallery(true);
-        });
-        refreshBtn.setLayoutParams(new LinearLayout.LayoutParams(dp(40), dp(40)));
-        add(UiKit.styleOneHeader(this, "灵感", refreshBtn), -2, 0);
-
-        LinearLayout switcher = UiKit.segmentedControl(this, new String[]{"创意广场", "提示词画廊"}, inspireTab, index -> {
-            if (inspireTab != index) { inspireTab = index; inspire(); }
-        });
-        add(switcher, -2, 14);
-
-        if (inspireTab == 0) renderPlazaSection();
-        else renderGallerySection();
-    }
-
-    private void renderPlazaSection() {
-        if (plazaItems.isEmpty() && !plazaLoading && plazaError.isEmpty()) {
-            fetchPlaza(true);
-            return;
-        }
-        if (plazaLoading && plazaItems.isEmpty()) {
-            add(loadingHintCard("正在加载创意广场…"), -2, 18);
-            return;
-        }
-        if (!plazaError.isEmpty() && plazaItems.isEmpty()) {
-            add(emptyCard("加载失败", plazaError, "重新加载", () -> fetchPlaza(true)), -2, 18);
+    private void openDetailOverlay(String id) {
+        current = id;
+        File localFile = id.isEmpty() ? null : new File(new File(getFilesDir(), "images"), id);
+        if (localFile != null && !localFile.isFile()) {
+            Toast.makeText(this, "作品文件不存在", Toast.LENGTH_SHORT).show();
+            refreshLibraryContent();
             return;
         }
 
-        add(buildStaggeredPlazaGrid(plazaItems), -2, 14);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setBackground(UiKit.auroraCanvasBg(this));
 
-        if (plazaLoading) {
-            TextView loading = UiKit.text(this, "正在加载更多灵感…", 12.5f, UiKit.MUTED, false);
-            loading.setGravity(Gravity.CENTER);
-            add(loading, -2, 14);
-        } else if (plazaHasMore) {
-            add(UiKit.glassButton(this, R.drawable.ic_refresh, "加载更多灵感", UiKit.GLASS_STRONG, UiKit.BLUE, () -> fetchPlaza(false)), 46, 16);
-        } else if (!plazaItems.isEmpty()) {
-            TextView end = UiKit.text(this, "已经到底啦", 12, UiKit.MUTED, false);
-            end.setGravity(Gravity.CENTER);
-            add(end, -2, 14);
-        }
-    }
-
-    private void renderGallerySection() {
-        if (galleryData == null && !galleryLoading && galleryError.isEmpty()) {
-            fetchGallery(false);
-            return;
-        }
-        if (galleryLoading && galleryData == null) {
-            add(loadingHintCard("首次拉取 5,400+ 提示词画廊并缓存离线可用…"), -2, 18);
-            return;
-        }
-        if (!galleryError.isEmpty() && galleryData == null) {
-            add(emptyCard("加载失败", galleryError, "重新加载", () -> fetchGallery(true)), -2, 18);
-            return;
-        }
-
-        // iOS Spotlight 风格毛玻璃药丸搜索栏
-        LinearLayout searchBar = new LinearLayout(this);
-        searchBar.setOrientation(LinearLayout.HORIZONTAL);
-        searchBar.setGravity(Gravity.CENTER_VERTICAL);
-        searchBar.setBackground(UiKit.liquidGlass(this, 24));
-        UiKit.applySoftShadow(searchBar, this, 4, 0x1A182638);
-        searchBar.setPadding(dp(14), dp(4), dp(8), dp(4));
-        searchBar.addView(UiKit.icon(this, R.drawable.ic_search, 16, UiKit.MUTED));
-
-        EditText searchInput = new EditText(this);
-        searchInput.setSingleLine(true);
-        searchInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-        searchInput.setBackground(null);
-        searchInput.setTextSize(13.5f);
-        searchInput.setTextColor(UiKit.INK);
-        searchInput.setHintTextColor(0xFF94A3B8);
-        searchInput.setHint("搜索 5,443 条提示词、风格、分类…");
-        searchInput.setText(galleryQuery);
-        searchInput.setSelection(galleryQuery.length());
-        searchInput.setOnEditorActionListener((v, actionId, event) -> {
-            galleryQuery = searchInput.getText().toString().trim();
-            galleryVisibleCount = GALLERY_PAGE_SIZE;
-            inspire();
-            return true;
-        });
-        LinearLayout.LayoutParams sip = new LinearLayout.LayoutParams(0, dp(38), 1);
-        sip.leftMargin = dp(8);
-        searchBar.addView(searchInput, sip);
-
-        if (!galleryQuery.isEmpty()) {
-            LinearLayout clr = new LinearLayout(this);
-            clr.setGravity(Gravity.CENTER);
-            clr.setPadding(dp(6), dp(6), dp(6), dp(6));
-            clr.addView(UiKit.icon(this, R.drawable.ic_close, 14, UiKit.MUTED));
-            clr.setOnClickListener(v -> {
-                galleryQuery = "";
-                galleryVisibleCount = GALLERY_PAGE_SIZE;
-                inspire();
-            });
-            searchBar.addView(clr);
-        }
-        TextView go = UiKit.text(this, "搜索", 12, Color.WHITE, true);
-        go.setBackground(UiKit.round(this, UiKit.BLUE, 14));
-        go.setPadding(dp(12), dp(6), dp(12), dp(6));
-        go.setOnClickListener(v -> {
-            galleryQuery = searchInput.getText().toString().trim();
-            galleryVisibleCount = GALLERY_PAGE_SIZE;
-            inspire();
-        });
-        searchBar.addView(go);
-        add(searchBar, -2, 12);
-
-        // 横向大类胶囊
-        HorizontalScrollView chipsScroll = new HorizontalScrollView(this);
-        chipsScroll.setHorizontalScrollBarEnabled(false);
-        LinearLayout chips = new LinearLayout(this);
-        chips.setOrientation(LinearLayout.HORIZONTAL);
-        chipsScroll.addView(chips);
-        for (int i = 0; i < galleryData.majors.size(); i++) {
-            String major = galleryData.majors.get(i);
-            TextView chip = UiKit.chip(this, major, major.equals(galleryMajor), () -> {
-                if (!major.equals(galleryMajor)) {
-                    galleryMajor = major;
-                    galleryVisibleCount = GALLERY_PAGE_SIZE;
-                    inspire();
-                }
-            });
-            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
-            if (i > 0) clp.leftMargin = dp(7);
-            chips.addView(chip, clp);
-        }
-        add(chipsScroll, -2, 12);
-
-        List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, galleryMajor, galleryQuery);
-        add(UiKit.text(this, "共 " + filtered.size() + " 条灵感 · 已缓存离线秒开", 11.5f, UiKit.MUTED, false), -2, 10);
-
-        if (filtered.isEmpty()) {
-            add(emptyCard("没有找到匹配的提示词", "试试切换分类或换个关键词搜索。", "重置筛选", () -> {
-                galleryMajor = "全部";
-                galleryQuery = "";
-                galleryVisibleCount = GALLERY_PAGE_SIZE;
-                inspire();
-            }), -2, 14);
-            return;
-        }
-
-        int showCount = Math.min(galleryVisibleCount, filtered.size());
-        add(buildStaggeredGalleryGrid(filtered.subList(0, showCount)), -2, 10);
-
-        if (showCount < filtered.size()) {
-            int remaining = filtered.size() - showCount;
-            add(UiKit.glassButton(this, R.drawable.ic_refresh, "加载更多（剩余 " + remaining + " 条）", UiKit.GLASS_STRONG, UiKit.BLUE, () -> {
-                galleryVisibleCount += GALLERY_PAGE_SIZE;
-                inspire();
-            }), 46, 16);
-        }
-    }
-
-    /** 无边框全出血双列错落瀑布流（创意广场） */
-    private LinearLayout buildStaggeredPlazaGrid(List<InspirationRepository.Item> items) {
-        LinearLayout columns = new LinearLayout(this);
-        columns.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout leftCol = new LinearLayout(this);
-        leftCol.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout rightCol = new LinearLayout(this);
-        rightCol.setOrientation(LinearLayout.VERTICAL);
-
-        for (int i = 0; i < items.size(); i++) {
-            InspirationRepository.Item item = items.get(i);
-            boolean isLeft = (i % 2 == 0);
-            int h = ((i % 4 == 0 || i % 4 == 3) ? 206 : 168);
-            FrameLayout tile = fullBleedPlazaTile(item, h);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(h));
-            if (i >= 2) lp.topMargin = dp(10);
-            if (isLeft) leftCol.addView(tile, lp);
-            else rightCol.addView(tile, lp);
-        }
-
-        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, -2, 1);
-        llp.rightMargin = dp(5);
-        columns.addView(leftCol, llp);
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, -2, 1);
-        rlp.leftMargin = dp(5);
-        columns.addView(rightCol, rlp);
-        return columns;
-    }
-
-    private FrameLayout fullBleedPlazaTile(InspirationRepository.Item item, int heightDp) {
-        FrameLayout tile = new FrameLayout(this);
-        tile.setBackground(UiKit.round(this, UiKit.SOFT, 22));
-        tile.setClipToOutline(true);
-        UiKit.applySoftShadow(tile, this, 6, 0x26182638);
-        tile.setFocusable(true);
-        tile.setOnClickListener(v -> inspireDetail(item));
-
-        ImageView img = new ImageView(this);
-        img.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        InspirationRepository.loadImage(this, img, item.thumbUrl, 520);
-        tile.addView(img, new FrameLayout.LayoutParams(-1, dp(heightDp)));
-
-        // 左上角磨砂参数微胶囊
-        if (!item.model.isEmpty()) {
-            TextView tag = UiKit.frostedBadge(this, item.model + " · " + item.ratio);
-            FrameLayout.LayoutParams tlp = new FrameLayout.LayoutParams(-2, -2);
-            tlp.gravity = Gravity.TOP | Gravity.START;
-            tlp.leftMargin = dp(9);
-            tlp.topMargin = dp(9);
-            tile.addView(tag, tlp);
-        }
-
-        // 底部极薄暗色磨砂浮条 + 一步「同款」微胶囊
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
-        bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackground(UiKit.darkFrosted(this, 16));
-        bar.setPadding(dp(10), dp(6), dp(6), dp(6));
-
-        TextView author = UiKit.text(this, item.author.isEmpty() ? "广场作品" : item.author, 11, Color.WHITE, false);
-        author.setMaxLines(1);
-        author.setEllipsize(TextUtils.TruncateAt.END);
-        bar.addView(author, new LinearLayout.LayoutParams(0, -2, 1));
-
-        TextView quickSame = UiKit.text(this, "同款", 10.5f, UiKit.BLUE, true);
-        quickSame.setBackground(UiKit.round(this, 0xEEFFFFFF, 11));
-        quickSame.setPadding(dp(9), dp(3.5f), dp(9), dp(3.5f));
-        quickSame.setOnClickListener(v -> applyInspirationToHome(item));
-        LinearLayout.LayoutParams qlp = new LinearLayout.LayoutParams(-2, -2);
-        qlp.leftMargin = dp(6);
-        bar.addView(quickSame, qlp);
-
-        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(-1, -2);
-        blp.gravity = Gravity.BOTTOM;
-        blp.leftMargin = dp(7);
-        blp.rightMargin = dp(7);
-        blp.bottomMargin = dp(7);
-        tile.addView(bar, blp);
-        return tile;
-    }
-
-    /** 无边框全出血双列错落瀑布流（提示词画廊） */
-    private LinearLayout buildStaggeredGalleryGrid(List<InspirationRepository.Item> items) {
-        LinearLayout columns = new LinearLayout(this);
-        columns.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout leftCol = new LinearLayout(this);
-        leftCol.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout rightCol = new LinearLayout(this);
-        rightCol.setOrientation(LinearLayout.VERTICAL);
-
-        for (int i = 0; i < items.size(); i++) {
-            InspirationRepository.Item item = items.get(i);
-            boolean isLeft = (i % 2 == 0);
-            int h = ((i % 4 == 0 || i % 4 == 3) ? 204 : 172);
-            FrameLayout tile = fullBleedGalleryTile(item, h);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(h));
-            if (i >= 2) lp.topMargin = dp(10);
-            if (isLeft) leftCol.addView(tile, lp);
-            else rightCol.addView(tile, lp);
-        }
-
-        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, -2, 1);
-        llp.rightMargin = dp(5);
-        columns.addView(leftCol, llp);
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, -2, 1);
-        rlp.leftMargin = dp(5);
-        columns.addView(rightCol, rlp);
-        return columns;
-    }
-
-    private FrameLayout fullBleedGalleryTile(InspirationRepository.Item item, int heightDp) {
-        FrameLayout tile = new FrameLayout(this);
-        tile.setBackground(UiKit.round(this, UiKit.SOFT, 22));
-        tile.setClipToOutline(true);
-        UiKit.applySoftShadow(tile, this, 6, 0x26182638);
-        tile.setFocusable(true);
-        tile.setOnClickListener(v -> inspireDetail(item));
-
-        ImageView img = new ImageView(this);
-        img.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        InspirationRepository.loadImage(this, img, item.thumbUrl, 520);
-        tile.addView(img, new FrameLayout.LayoutParams(-1, dp(heightDp)));
-
-        LinearLayout overlay = new LinearLayout(this);
-        overlay.setOrientation(LinearLayout.VERTICAL);
-        overlay.setBackground(UiKit.scrimBottom(22, this));
-        overlay.setPadding(dp(11), dp(26), dp(11), dp(11));
-
-        TextView title = UiKit.text(this, item.title.isEmpty() ? item.prompt : item.title, 12.5f, Color.WHITE, true);
-        title.setMaxLines(1);
-        title.setEllipsize(TextUtils.TruncateAt.END);
-        overlay.addView(title);
-
-        String cat = !item.category.isEmpty() ? item.category : item.major;
-        if (!cat.isEmpty()) {
-            TextView sub = UiKit.text(this, cat, 10.5f, 0xD9FFFFFF, false);
-            sub.setMaxLines(1);
-            sub.setEllipsize(TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-1, -2);
-            slp.topMargin = dp(2);
-            overlay.addView(sub, slp);
-        }
-        FrameLayout.LayoutParams olp = new FrameLayout.LayoutParams(-1, -2);
-        olp.gravity = Gravity.BOTTOM;
-        tile.addView(overlay, olp);
-        return tile;
-    }
-
-    // ==================== 06 灵感详情 · 沉浸环境光 ====================
-
-    private void inspireDetail(InspirationRepository.Item item) {
-        activeInspiration = item;
-        layout("inspire_detail", true);
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(18), dp(14), dp(18), dp(28));
+        scroll.addView(page, new FrameLayout.LayoutParams(-1, -2));
 
         FrameLayout frame = new FrameLayout(this);
-        frame.setBackground(UiKit.round(this, UiKit.SOFT, 28));
+        frame.setBackground(UiKit.round(this, UiKit.SOFT, 26));
         frame.setClipToOutline(true);
-        UiKit.applySoftShadow(frame, this, 16, 0x553B74E6);
+        UiKit.applySoftShadow(frame, this, 16, 0x503B74E6);
 
         ImageView image = new ImageView(this);
         image.setAdjustViewBounds(true);
         image.setMinimumHeight(dp(260));
-        InspirationRepository.loadImage(this, image, item.imageUrl, 1600);
-        frame.addView(image, new FrameLayout.LayoutParams(-1, -2));
-
-        // 顶部左右悬浮圆形毛玻璃图标按钮
-        LinearLayout backCircle = UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::onBackPressed);
-        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(dp(40), dp(40));
-        blp.gravity = Gravity.TOP | Gravity.START;
-        blp.leftMargin = dp(12);
-        blp.topMargin = dp(12);
-        frame.addView(backCircle, blp);
-
-        LinearLayout saveCircle = UiKit.circleIconBtn(this, R.drawable.ic_download, UiKit.INK, UiKit.GLASS_STRONG, () -> exportRemoteImage(item));
-        FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(dp(40), dp(40));
-        slp.gravity = Gravity.TOP | Gravity.END;
-        slp.rightMargin = dp(12);
-        slp.topMargin = dp(12);
-        frame.addView(saveCircle, slp);
-
-        String corner = !item.model.isEmpty() ? item.model + " · " + item.ratio
-                : (!item.major.isEmpty() ? item.major + " · " + item.ratio : item.ratio);
-        TextView cornerTag = UiKit.frostedBadge(this, corner);
-        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2);
-        clp.gravity = Gravity.BOTTOM | Gravity.START;
-        clp.leftMargin = dp(12);
-        clp.bottomMargin = dp(12);
-        frame.addView(cornerTag, clp);
-        add(frame, -2, 0);
-
-        if (!item.title.isEmpty() || !item.author.isEmpty()) {
-            LinearLayout metaRow = new LinearLayout(this);
-            metaRow.setOrientation(LinearLayout.HORIZONTAL);
-            metaRow.setGravity(Gravity.CENTER_VERTICAL);
-            String heading = !item.title.isEmpty() ? item.title : "广场灵感作品";
-            metaRow.addView(UiKit.text(this, heading, 18, UiKit.INK, true), new LinearLayout.LayoutParams(0, -2, 1));
-            String rightMeta = !item.author.isEmpty() ? "by " + item.author : item.category;
-            if (!rightMeta.isEmpty()) metaRow.addView(UiKit.text(this, rightMeta, 12, UiKit.MUTED, false));
-            add(metaRow, -2, 14);
-        }
-
-        add(promptDetailCard(item.prompt), -2, 12);
-        add(UiKit.prismButton(this, R.drawable.ic_sparkles, "一键做同款", () -> applyInspirationToHome(item)), 52, 16);
-
-        LinearLayout subActions = new LinearLayout(this);
-        subActions.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout asRef = UiKit.glassButton(this, R.drawable.ic_image_plus, "设为参考图", UiKit.GLASS_STRONG, UiKit.BLUE, () -> useRemoteAsReference(item));
-        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(46), 1);
-        lp1.rightMargin = dp(6);
-        subActions.addView(asRef, lp1);
-
-        LinearLayout saveBtn = UiKit.glassButton(this, R.drawable.ic_download, "保存原图", UiKit.GLASS_STRONG, UiKit.INK, () -> exportRemoteImage(item));
-        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(46), 1);
-        lp2.leftMargin = dp(6);
-        subActions.addView(saveBtn, lp2);
-        add(subActions, -2, 10);
-    }
-
-    private void applyInspirationToHome(InspirationRepository.Item item) {
-        draft = item.prompt;
-        if ("Grok".equals(item.model)) {
-            setModelByName("Grok");
-            nsfw = item.nsfw;
-        } else if ("GPT".equals(item.model)) {
-            setModelByName("GPT");
-        }
-        setRatioByName(item.ratio);
-        reference = null;
-        Toast.makeText(this, "已填入同款提示词与参数", Toast.LENGTH_SHORT).show();
-        home();
-    }
-
-    private void useRemoteAsReference(InspirationRepository.Item item) {
-        Toast.makeText(this, "正在准备参考图…", Toast.LENGTH_SHORT).show();
-        Handler main = new Handler(Looper.getMainLooper());
-        new Thread(() -> {
-            try {
-                Uri cached = service.cacheRemoteReference(item.imageUrl);
-                main.post(() -> {
-                    MainActivity act = visible;
-                    if (act == null || act.isFinishing() || act.isDestroyed()) return;
-                    act.reference = cached;
-                    act.setRatioByName(item.ratio);
-                    Toast.makeText(act, "已设为参考图，可输入修改描述", Toast.LENGTH_SHORT).show();
-                    act.home();
-                });
-            } catch (Exception e) {
-                String msg = e.getMessage() == null ? "无法加载参考图。" : e.getMessage();
-                main.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
-            }
-        }, "jianyu-remote-ref").start();
-    }
-
-    private void exportRemoteImage(InspirationRepository.Item item) {
-        String url = item.imageUrl.toLowerCase(Locale.ROOT);
-        String ext = url.endsWith(".png") ? "png" : url.endsWith(".webp") ? "webp" : "jpg";
-        String mime = "jpg".equals(ext) ? "image/jpeg" : "image/" + ext;
-        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
-                .setType(mime)
-                .addCategory(Intent.CATEGORY_OPENABLE)
-                .putExtra(Intent.EXTRA_TITLE, "见屿-灵感-" + item.id + "." + ext);
-        startActivityForResult(intent, SAVE_REMOTE_IMAGE);
-    }
-
-    private void fetchPlaza(boolean reset) {
-        if (plazaLoading) return;
-        plazaLoading = true;
-        plazaError = "";
-        int nextPage = reset ? 1 : plazaPage + 1;
-        if (reset) {
-            plazaItems.clear();
-            plazaPage = 0;
-            plazaHasMore = true;
-        }
-        if ("inspire".equals(screen) && inspireTab == 0) inspire();
-        Handler main = new Handler(Looper.getMainLooper());
-        new Thread(() -> {
-            try {
-                InspirationRepository.PageResult result = InspirationRepository.fetchPlazaPage(nextPage, PLAZA_PAGE_SIZE);
-                main.post(() -> {
-                    plazaLoading = false;
-                    plazaPage = nextPage;
-                    plazaHasMore = result.hasMore;
-                    plazaItems.addAll(result.items);
-                    MainActivity act = visible;
-                    if (act != null && "inspire".equals(act.screen) && act.inspireTab == 0) act.inspire();
-                });
-            } catch (Exception e) {
-                String msg = e.getMessage() == null ? "创意广场加载失败，请检查网络。" : e.getMessage();
-                main.post(() -> {
-                    plazaLoading = false;
-                    plazaError = msg;
-                    MainActivity act = visible;
-                    if (act != null && "inspire".equals(act.screen) && act.inspireTab == 0) act.inspire();
-                });
-            }
-        }, "jianyu-plaza").start();
-    }
-
-    private void fetchGallery(boolean forceRefresh) {
-        if (galleryLoading) return;
-        galleryLoading = true;
-        galleryError = "";
-        if (forceRefresh) galleryData = null;
-        if ("inspire".equals(screen) && inspireTab == 1) inspire();
-        Context appContext = getApplicationContext();
-        Handler main = new Handler(Looper.getMainLooper());
-        new Thread(() -> {
-            try {
-                InspirationRepository.GalleryData data = InspirationRepository.loadGallery(appContext, forceRefresh);
-                main.post(() -> {
-                    galleryLoading = false;
-                    galleryData = data;
-                    MainActivity act = visible;
-                    if (act != null && "inspire".equals(act.screen) && act.inspireTab == 1) act.inspire();
-                });
-            } catch (Exception e) {
-                String msg = e.getMessage() == null ? "提示词画廊加载失败，请检查网络。" : e.getMessage();
-                main.post(() -> {
-                    galleryLoading = false;
-                    galleryError = msg;
-                    MainActivity act = visible;
-                    if (act != null && "inspire".equals(act.screen) && act.inspireTab == 1) act.inspire();
-                });
-            }
-        }, "jianyu-gallery").start();
-    }
-
-    // ==================== 07 作品库 · Apple Photos 无边框相册 ====================
-
-    private void library() {
-        layout("library", true);
-        String[] allIds = listLocalArtworkIds();
-
-        TextView count = UiKit.softBadge(this, allIds.length + " 幅", UiKit.GLASS_STRONG, UiKit.MUTED);
-        add(UiKit.styleOneHeader(this, "作品库", count), -2, 0);
-
-        LinearLayout filterRow = new LinearLayout(this);
-        filterRow.setOrientation(LinearLayout.HORIZONTAL);
-        String[] filters = {"全部", "GPT", "Grok"};
-        for (int i = 0; i < filters.length; i++) {
-            final int idx = i;
-            TextView chip = UiKit.chip(this, filters[i], idx == libraryFilter, () -> {
-                if (libraryFilter != idx) { libraryFilter = idx; library(); }
-            });
-            LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(-2, -2);
-            if (i > 0) flp.leftMargin = dp(8);
-            filterRow.addView(chip, flp);
-        }
-        add(filterRow, -2, 14);
-
-        List<String> filtered = new ArrayList<>();
-        for (String id : allIds) {
-            if (libraryFilter == 0) filtered.add(id);
-            else {
-                String m = service.modelLabel(id);
-                if (libraryFilter == 1 && "GPT".equals(m)) filtered.add(id);
-                else if (libraryFilter == 2 && "Grok".equals(m)) filtered.add(id);
-            }
-        }
-
-        if (filtered.isEmpty()) {
-            String title = allIds.length == 0 ? "作品库还是空的" : "该筛选下暂无作品";
-            String desc = allIds.length == 0
-                    ? "生成的图片会自动保存在本机，随时可欣赏、导出或再创作。"
-                    : "切换到「全部」查看已有作品，或去创作一幅新图。";
-            add(emptyCard(title, desc, "开始创作", this::home), -2, 18);
-            return;
-        }
-
-        long startOfToday = startOfDayMillis(System.currentTimeMillis());
-        long startOfYesterday = startOfToday - 24L * 60 * 60 * 1000;
-        Map<String, List<String>> groups = new LinkedHashMap<>();
-        for (String id : filtered) {
-            long ts = extractTimestamp(id);
-            String label = ts >= startOfToday ? "今天" : ts >= startOfYesterday ? "昨天" : "更早";
-            List<String> bucket = groups.get(label);
-            if (bucket == null) {
-                bucket = new ArrayList<>();
-                groups.put(label, bucket);
-            }
-            bucket.add(id);
-        }
-
-        File dir = new File(getFilesDir(), "images");
-        for (Map.Entry<String, List<String>> entry : groups.entrySet()) {
-            add(UiKit.text(this, entry.getKey(), 13, UiKit.MUTED, true), -2, 16);
-            add(buildPhotosGrid(dir, entry.getValue()), -2, 10);
-        }
-    }
-
-    private LinearLayout buildPhotosGrid(File dir, List<String> ids) {
-        LinearLayout grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        for (int i = 0; i < ids.size(); i += 2) {
-            LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(-1, -2);
-            if (i > 0) rlp.topMargin = dp(10);
-
-            String leftId = ids.get(i);
-            FrameLayout left = fullBleedLocalTile(leftId, new File(dir, leftId), 178, artworkBadge(leftId));
-            LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(0, dp(178), 1);
-            llp.rightMargin = dp(5);
-            row.addView(left, llp);
-
-            if (i + 1 < ids.size()) {
-                String rightId = ids.get(i + 1);
-                FrameLayout right = fullBleedLocalTile(rightId, new File(dir, rightId), 178, artworkBadge(rightId));
-                LinearLayout.LayoutParams rrp = new LinearLayout.LayoutParams(0, dp(178), 1);
-                rrp.leftMargin = dp(5);
-                row.addView(right, rrp);
-            } else {
-                View spacer = new View(this);
-                LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(0, dp(1), 1);
-                sp.leftMargin = dp(5);
-                row.addView(spacer, sp);
-            }
-            grid.addView(row, rlp);
-        }
-        return grid;
-    }
-
-    // ==================== 08 作品详情 · 环境光沉浸 ====================
-
-    private void detail(String id) {
-        current = id;
-        layout("detail", true);
-
-        FrameLayout frame = new FrameLayout(this);
-        frame.setBackground(UiKit.round(this, UiKit.SOFT, 28));
-        frame.setClipToOutline(true);
-        UiKit.applySoftShadow(frame, this, 18, 0x5A3B74E6);
-
-        ImageView image = new ImageView(this);
-        image.setAdjustViewBounds(true);
-        if (id.isEmpty()) {
+        if (localFile == null) {
             image.setImageResource(R.drawable.coast);
         } else {
-            File f = new File(new File(getFilesDir(), "images"), id);
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(f.getPath(), o);
-            o.inSampleSize = 1;
-            while ((long) Math.max(o.outWidth, o.outHeight) / o.inSampleSize > 1800) o.inSampleSize *= 2;
-            o.inJustDecodeBounds = false;
-            Bitmap bitmap = BitmapFactory.decodeFile(f.getPath(), o);
-            if (bitmap == null) { library(); return; }
-            image.setImageBitmap(bitmap);
+            InspirationRepository.loadLocalThumb(image, localFile, 1600);
         }
+        image.setOnClickListener(v -> openFullscreenZoom(localFile, null, null));
         frame.addView(image, new FrameLayout.LayoutParams(-1, -2));
 
-        // 顶部左右悬浮圆形毛玻璃图标按钮
-        LinearLayout backCircle = UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::onBackPressed);
-        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(dp(40), dp(40));
+        LinearLayout backCircle = UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::popOverlay);
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(dp(44), dp(44));
         blp.gravity = Gravity.TOP | Gravity.START;
         blp.leftMargin = dp(12);
         blp.topMargin = dp(12);
         frame.addView(backCircle, blp);
 
-        if (!id.isEmpty()) {
-            LinearLayout delCircle = UiKit.circleIconBtn(this, R.drawable.ic_trash, UiKit.DANGER, 0xE6FFF0F0, () ->
+        LinearLayout rightCircles = new LinearLayout(this);
+        rightCircles.setOrientation(LinearLayout.HORIZONTAL);
+        if (localFile != null) {
+            LinearLayout shareCircle = UiKit.circleIconBtn(this, R.drawable.ic_share, UiKit.INK, UiKit.GLASS_STRONG, () -> shareLocalArtwork(id, localFile));
+            rightCircles.addView(shareCircle, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+            LinearLayout delCircle = UiKit.circleIconBtn(this, R.drawable.ic_trash, UiKit.DANGER, 0xF0FFF0F0, () ->
                     new AlertDialog.Builder(this)
                             .setTitle("删除作品")
                             .setMessage("确定从本机作品库删除这幅作品吗？")
@@ -1272,14 +1895,19 @@ public final class MainActivity extends Activity {
                             .setPositiveButton("删除", (d, w) -> {
                                 service.deleteArtwork(id);
                                 Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show();
-                                library();
+                                popOverlay();
+                                refreshHomeDynamic();
+                                refreshLibraryContent();
                             }).show());
-            FrameLayout.LayoutParams dlp = new FrameLayout.LayoutParams(dp(40), dp(40));
-            dlp.gravity = Gravity.TOP | Gravity.END;
-            dlp.rightMargin = dp(12);
-            dlp.topMargin = dp(12);
-            frame.addView(delCircle, dlp);
+            LinearLayout.LayoutParams dclp = new LinearLayout.LayoutParams(dp(44), dp(44));
+            dclp.leftMargin = dp(8);
+            rightCircles.addView(delCircle, dclp);
         }
+        FrameLayout.LayoutParams rclp = new FrameLayout.LayoutParams(-2, -2);
+        rclp.gravity = Gravity.TOP | Gravity.END;
+        rclp.rightMargin = dp(12);
+        rclp.topMargin = dp(12);
+        frame.addView(rightCircles, rclp);
 
         String badgeText = id.isEmpty() ? "内置示例" : artworkBadge(id);
         if (!badgeText.isEmpty()) {
@@ -1290,20 +1918,35 @@ public final class MainActivity extends Activity {
             tlp.bottomMargin = dp(12);
             frame.addView(tag, tlp);
         }
-        add(frame, -2, 0);
+
+        TextView zoomHint = UiKit.frostedBadge(this, "轻触全屏缩放");
+        FrameLayout.LayoutParams zlp = new FrameLayout.LayoutParams(-2, -2);
+        zlp.gravity = Gravity.BOTTOM | Gravity.END;
+        zlp.rightMargin = dp(12);
+        zlp.bottomMargin = dp(12);
+        frame.addView(zoomHint, zlp);
+
+        page.addView(frame, new LinearLayout.LayoutParams(-1, -2));
+
+        // 真实分辨率 / 文件体积 / 生成时间元数据条
+        String metaSummary = service.artworkMetaSummary(id);
+        if (!metaSummary.isEmpty()) {
+            TextView metaView = UiKit.text(this, metaSummary, 12, UiKit.MUTED, false);
+            LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(-1, -2);
+            mlp.topMargin = dp(10);
+            mlp.leftMargin = dp(4);
+            page.addView(metaView, mlp);
+        }
 
         String promptText = description(id);
-        add(promptDetailCard(promptText), -2, 16);
+        LinearLayout.LayoutParams ptlp = new LinearLayout.LayoutParams(-1, -2);
+        ptlp.topMargin = dp(12);
+        page.addView(promptDetailCard(promptText), ptlp);
 
-        add(UiKit.prismButton(this, R.drawable.ic_download, "保存至相册", () -> {
-            String ext = id.isEmpty() ? "jpg" : id.substring(id.lastIndexOf('.') + 1);
-            String mime = "jpg".equals(ext) ? "image/jpeg" : "image/" + ext;
-            Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
-                    .setType(mime)
-                    .addCategory(Intent.CATEGORY_OPENABLE)
-                    .putExtra(Intent.EXTRA_TITLE, "见屿-" + (id.isEmpty() ? "海岸晨光.jpg" : id));
-            startActivityForResult(intent, SAVE_LOCAL_IMAGE);
-        }), 52, 16);
+        LinearLayout savePrimary = UiKit.prismButton(this, R.drawable.ic_download, "一键保存至相册", () -> saveLocalArtwork(id));
+        LinearLayout.LayoutParams splp = new LinearLayout.LayoutParams(-1, dp(52));
+        splp.topMargin = dp(16);
+        page.addView(savePrimary, splp);
 
         LinearLayout secondaryRow = new LinearLayout(this);
         secondaryRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -1315,30 +1958,194 @@ public final class MainActivity extends Activity {
             if (!r.isEmpty()) setRatioByName(r);
             reference = null;
             Toast.makeText(this, "已回填画面描述与参数", Toast.LENGTH_SHORT).show();
-            home();
+            clearOverlays();
+            switchTab(0);
         });
-        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(46), 1);
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(48), 1);
         lp1.rightMargin = dp(6);
         secondaryRow.addView(remix, lp1);
 
         LinearLayout asRef = UiKit.glassButton(this, R.drawable.ic_image_plus, "设为参考图", UiKit.GLASS_STRONG, UiKit.INK, () -> {
-            if (id.isEmpty()) {
+            if (localFile == null) {
                 Toast.makeText(this, "内置示例仅支持同款再创作", Toast.LENGTH_SHORT).show();
                 return;
             }
-            File file = new File(new File(getFilesDir(), "images"), id);
-            if (!file.isFile()) {
-                Toast.makeText(this, "作品文件不存在", Toast.LENGTH_SHORT).show();
-                return;
-            }
-            reference = Uri.fromFile(file);
+            reference = Uri.fromFile(localFile);
             Toast.makeText(this, "已设为参考图，可输入修改描述", Toast.LENGTH_SHORT).show();
-            home();
+            clearOverlays();
+            switchTab(0);
         });
-        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(46), 1);
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(48), 1);
         lp2.leftMargin = dp(6);
         secondaryRow.addView(asRef, lp2);
-        add(secondaryRow, -2, 10);
+
+        LinearLayout.LayoutParams srlp = new LinearLayout.LayoutParams(-1, -2);
+        srlp.topMargin = dp(10);
+        page.addView(secondaryRow, srlp);
+
+        pushOverlay("detail", scroll);
+    }
+
+    // ==================== 二级页面 3：灵感详情（渐进高清加载 + 收藏 + 分享 + 一键直存 + 全屏缩放） ====================
+
+    private void openInspireDetailOverlay(InspirationRepository.Item item) {
+        activeInspiration = item;
+
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        scroll.setBackground(UiKit.auroraCanvasBg(this));
+
+        LinearLayout page = new LinearLayout(this);
+        page.setOrientation(LinearLayout.VERTICAL);
+        page.setPadding(dp(18), dp(14), dp(18), dp(28));
+        scroll.addView(page, new FrameLayout.LayoutParams(-1, -2));
+
+        FrameLayout frame = new FrameLayout(this);
+        frame.setBackground(UiKit.round(this, UiKit.SOFT, 26));
+        frame.setClipToOutline(true);
+        UiKit.applySoftShadow(frame, this, 16, 0x503B74E6);
+
+        ImageView image = new ImageView(this);
+        image.setAdjustViewBounds(true);
+        image.setMinimumHeight(dp(260));
+        // 渐进式加载：0ms 秒显已缓存缩略图，后台高清原图无缝替换
+        InspirationRepository.loadProgressiveImage(this, image, item.thumbUrl, item.imageUrl, 1600);
+        image.setOnClickListener(v -> openFullscreenZoom(null, item.thumbUrl, item.imageUrl));
+        frame.addView(image, new FrameLayout.LayoutParams(-1, -2));
+
+        LinearLayout backCircle = UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::popOverlay);
+        FrameLayout.LayoutParams blp = new FrameLayout.LayoutParams(dp(44), dp(44));
+        blp.gravity = Gravity.TOP | Gravity.START;
+        blp.leftMargin = dp(12);
+        blp.topMargin = dp(12);
+        frame.addView(backCircle, blp);
+
+        LinearLayout rightCircles = new LinearLayout(this);
+        rightCircles.setOrientation(LinearLayout.HORIZONTAL);
+
+        boolean initialFav = InspirationRepository.isFavorite(this, item);
+        LinearLayout favCircle = new LinearLayout(this);
+        favCircle.setGravity(Gravity.CENTER);
+        favCircle.setBackground(UiKit.card(this, UiKit.GLASS_STRONG, 0xFFE4ECF6, 22));
+        UiKit.applySoftShadow(favCircle, this, 5, 0x2B182638);
+        ImageView favIcon = UiKit.icon(this, initialFav ? R.drawable.ic_heart_filled : R.drawable.ic_heart, 19,
+                initialFav ? 0xFFE5484D : UiKit.INK);
+        favCircle.addView(favIcon);
+        favCircle.setOnClickListener(v -> {
+            boolean nowFav = InspirationRepository.toggleFavorite(this, item);
+            favIcon.setImageResource(nowFav ? R.drawable.ic_heart_filled : R.drawable.ic_heart);
+            favIcon.setColorFilter(nowFav ? 0xFFE5484D : UiKit.INK, PorterDuff.Mode.SRC_IN);
+            Toast.makeText(this, nowFav ? "已加入灵感收藏" : "已取消收藏", Toast.LENGTH_SHORT).show();
+            if (activeTab == 1) refreshInspireTab(false);
+        });
+        rightCircles.addView(favCircle, new LinearLayout.LayoutParams(dp(44), dp(44)));
+
+        LinearLayout shareCircle = UiKit.circleIconBtn(this, R.drawable.ic_share, UiKit.INK, UiKit.GLASS_STRONG, () -> shareRemoteImage(item));
+        LinearLayout.LayoutParams sclp = new LinearLayout.LayoutParams(dp(44), dp(44));
+        sclp.leftMargin = dp(8);
+        rightCircles.addView(shareCircle, sclp);
+
+        FrameLayout.LayoutParams rclp = new FrameLayout.LayoutParams(-2, -2);
+        rclp.gravity = Gravity.TOP | Gravity.END;
+        rclp.rightMargin = dp(12);
+        rclp.topMargin = dp(12);
+        frame.addView(rightCircles, rclp);
+
+        String corner = !item.model.isEmpty() ? item.model + " · " + item.ratio
+                : (!item.major.isEmpty() ? item.major + " · " + item.ratio : item.ratio);
+        TextView cornerTag = UiKit.frostedBadge(this, corner);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(-2, -2);
+        clp.gravity = Gravity.BOTTOM | Gravity.START;
+        clp.leftMargin = dp(12);
+        clp.bottomMargin = dp(12);
+        frame.addView(cornerTag, clp);
+
+        TextView zoomHint = UiKit.frostedBadge(this, "轻触全屏缩放");
+        FrameLayout.LayoutParams zlp = new FrameLayout.LayoutParams(-2, -2);
+        zlp.gravity = Gravity.BOTTOM | Gravity.END;
+        zlp.rightMargin = dp(12);
+        zlp.bottomMargin = dp(12);
+        frame.addView(zoomHint, zlp);
+
+        page.addView(frame, new LinearLayout.LayoutParams(-1, -2));
+
+        LinearLayout metaRow = new LinearLayout(this);
+        metaRow.setOrientation(LinearLayout.HORIZONTAL);
+        metaRow.setGravity(Gravity.CENTER_VERTICAL);
+        String heading = !item.title.isEmpty() ? item.title : "创意广场灵感";
+        metaRow.addView(UiKit.text(this, heading, 17.5f, UiKit.INK, true), new LinearLayout.LayoutParams(0, -2, 1));
+        StringBuilder rightMeta = new StringBuilder();
+        if (!item.author.isEmpty()) rightMeta.append("by ").append(item.author);
+        else if (!item.category.isEmpty()) rightMeta.append(item.category);
+        if (item.width > 0 && item.height > 0) {
+            if (rightMeta.length() > 0) rightMeta.append(" · ");
+            rightMeta.append(item.width).append("×").append(item.height);
+        }
+        if (rightMeta.length() > 0) metaRow.addView(UiKit.text(this, rightMeta.toString(), 12, UiKit.MUTED, false));
+        LinearLayout.LayoutParams mrlp = new LinearLayout.LayoutParams(-1, -2);
+        mrlp.topMargin = dp(12);
+        page.addView(metaRow, mrlp);
+
+        LinearLayout.LayoutParams ptlp = new LinearLayout.LayoutParams(-1, -2);
+        ptlp.topMargin = dp(12);
+        page.addView(promptDetailCard(item.prompt), ptlp);
+
+        LinearLayout primaryBtn = UiKit.prismButton(this, R.drawable.ic_sparkles, "一键做同款", () -> applyInspirationToHome(item));
+        LinearLayout.LayoutParams pblp = new LinearLayout.LayoutParams(-1, dp(52));
+        pblp.topMargin = dp(16);
+        page.addView(primaryBtn, pblp);
+
+        LinearLayout subActions = new LinearLayout(this);
+        subActions.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout asRef = UiKit.glassButton(this, R.drawable.ic_image_plus, "设为参考图", UiKit.GLASS_STRONG, UiKit.BLUE, () -> useRemoteAsReference(item));
+        LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(48), 1);
+        lp1.rightMargin = dp(6);
+        subActions.addView(asRef, lp1);
+
+        LinearLayout saveBtn = UiKit.glassButton(this, R.drawable.ic_download, "保存原图", UiKit.GLASS_STRONG, UiKit.INK, () -> saveRemoteImage(item));
+        LinearLayout.LayoutParams lp2 = new LinearLayout.LayoutParams(0, dp(48), 1);
+        lp2.leftMargin = dp(6);
+        subActions.addView(saveBtn, lp2);
+
+        LinearLayout.LayoutParams salp = new LinearLayout.LayoutParams(-1, -2);
+        salp.topMargin = dp(10);
+        page.addView(subActions, salp);
+
+        pushOverlay("inspire_detail", scroll);
+    }
+
+    // ==================== 二级页面 4：全屏双指缩放看图器 ====================
+
+    private void openFullscreenZoom(File localFile, String thumbUrl, String fullUrl) {
+        FrameLayout viewer = new FrameLayout(this);
+        viewer.setBackgroundColor(0xF50A0E17);
+
+        ZoomImageView zoom = new ZoomImageView(this);
+        zoom.setOnSingleTap(this::popOverlay);
+        if (localFile != null) {
+            InspirationRepository.loadLocalThumb(zoom, localFile, 2200);
+        } else if (fullUrl != null) {
+            InspirationRepository.loadProgressiveImage(this, zoom, thumbUrl, fullUrl, 2200);
+        } else {
+            zoom.setImageResource(R.drawable.coast);
+        }
+        viewer.addView(zoom, new FrameLayout.LayoutParams(-1, -1));
+
+        LinearLayout closeBtn = UiKit.circleIconBtn(this, R.drawable.ic_close, Color.WHITE, 0x88141E2E, this::popOverlay);
+        FrameLayout.LayoutParams clp = new FrameLayout.LayoutParams(dp(44), dp(44));
+        clp.gravity = Gravity.TOP | Gravity.END;
+        clp.topMargin = dp(14);
+        clp.rightMargin = dp(14);
+        viewer.addView(closeBtn, clp);
+
+        TextView tip = UiKit.frostedBadge(this, "双指缩放 · 双击放大 · 轻触退出");
+        FrameLayout.LayoutParams tlp = new FrameLayout.LayoutParams(-2, -2);
+        tlp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
+        tlp.bottomMargin = dp(24);
+        viewer.addView(tip, tlp);
+
+        pushOverlay("zoom", viewer);
     }
 
     private LinearLayout promptDetailCard(String promptText) {
@@ -1363,6 +2170,129 @@ public final class MainActivity extends Activity {
         return card;
     }
 
+    // ==================== 一键保存至相册 / 分享 / 同款 / 参考图 ====================
+
+    private void saveLocalArtwork(String id) {
+        String ext = id.isEmpty() ? "jpg" : id.substring(id.lastIndexOf('.') + 1);
+        String mime = "jpg".equals(ext) ? "image/jpeg" : "image/" + ext;
+        String displayName = "见屿-" + (id.isEmpty() ? "海岸晨光.jpg" : id);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            new Thread(() -> {
+                try (InputStream in = id.isEmpty()
+                        ? getResources().openRawResource(R.drawable.coast)
+                        : new FileInputStream(new File(new File(getFilesDir(), "images"), id))) {
+                    service.saveToSystemGallery(in, displayName, mime);
+                    uiHandler.post(() -> Toast.makeText(this, "已保存到相册 Pictures/见屿", Toast.LENGTH_SHORT).show());
+                } catch (Exception e) {
+                    uiHandler.post(() -> Toast.makeText(this, "保存失败：" + e.getMessage(), Toast.LENGTH_LONG).show());
+                }
+            }, "jianyu-save-local").start();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .setType(mime)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .putExtra(Intent.EXTRA_TITLE, displayName);
+        startActivityForResult(intent, SAVE_LOCAL_IMAGE);
+    }
+
+    private void saveRemoteImage(InspirationRepository.Item item) {
+        String url = item.imageUrl.toLowerCase(Locale.ROOT);
+        String ext = url.endsWith(".png") ? "png" : url.endsWith(".webp") ? "webp" : "jpg";
+        String mime = "jpg".equals(ext) ? "image/jpeg" : "image/" + ext;
+        String displayName = "见屿-灵感-" + item.id + "." + ext;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            Toast.makeText(this, "正在保存原图至相册…", Toast.LENGTH_SHORT).show();
+            Context appContext = getApplicationContext();
+            new Thread(() -> {
+                try {
+                    File cached = InspirationRepository.ensureCachedImage(appContext, item.imageUrl);
+                    try (InputStream in = new FileInputStream(cached)) {
+                        service.saveToSystemGallery(in, displayName, mime);
+                    }
+                    uiHandler.post(() -> Toast.makeText(this, "原图已保存到相册 Pictures/见屿", Toast.LENGTH_SHORT).show());
+                } catch (Exception e) {
+                    uiHandler.post(() -> Toast.makeText(this, "保存失败，请稍后重试。", Toast.LENGTH_LONG).show());
+                }
+            }, "jianyu-save-remote-q").start();
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .setType(mime)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .putExtra(Intent.EXTRA_TITLE, displayName);
+        startActivityForResult(intent, SAVE_REMOTE_IMAGE);
+    }
+
+    private void shareLocalArtwork(String id, File file) {
+        String ext = id.substring(id.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        String mime = "jpg".equals(ext) ? "image/jpeg" : "image/" + ext;
+        try {
+            service.shareImageFile(this, file, mime);
+        } catch (Exception e) {
+            Toast.makeText(this, "无法调起分享：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void shareRemoteImage(InspirationRepository.Item item) {
+        Toast.makeText(this, "正在准备分享原图…", Toast.LENGTH_SHORT).show();
+        Context appContext = getApplicationContext();
+        new Thread(() -> {
+            try {
+                File cached = InspirationRepository.ensureCachedImage(appContext, item.imageUrl);
+                String url = item.imageUrl.toLowerCase(Locale.ROOT);
+                String mime = url.endsWith(".png") ? "image/png" : url.endsWith(".webp") ? "image/webp" : "image/jpeg";
+                uiHandler.post(() -> {
+                    MainActivity act = visible;
+                    if (act == null || act.isFinishing() || act.isDestroyed()) return;
+                    try {
+                        act.service.shareImageFile(act, cached, mime);
+                    } catch (Exception e) {
+                        Toast.makeText(act, "无法调起分享：" + e.getMessage(), Toast.LENGTH_SHORT).show();
+                    }
+                });
+            } catch (Exception e) {
+                uiHandler.post(() -> Toast.makeText(this, "原图准备失败，请稍后重试。", Toast.LENGTH_SHORT).show());
+            }
+        }, "jianyu-share-remote").start();
+    }
+
+    private void applyInspirationToHome(InspirationRepository.Item item) {
+        draft = item.prompt;
+        if ("Grok".equals(item.model)) {
+            setModelByName("Grok");
+            nsfw = item.nsfw;
+        } else if ("GPT".equals(item.model)) {
+            setModelByName("GPT");
+        }
+        setRatioByName(item.ratio);
+        reference = null;
+        Toast.makeText(this, "已填入同款提示词与参数", Toast.LENGTH_SHORT).show();
+        clearOverlays();
+        switchTab(0);
+    }
+
+    private void useRemoteAsReference(InspirationRepository.Item item) {
+        Toast.makeText(this, "正在准备参考图…", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            try {
+                Uri cached = service.cacheRemoteReference(item.imageUrl);
+                uiHandler.post(() -> {
+                    MainActivity act = visible;
+                    if (act == null || act.isFinishing() || act.isDestroyed()) return;
+                    act.reference = cached;
+                    act.setRatioByName(item.ratio);
+                    Toast.makeText(act, "已设为参考图，可输入修改描述", Toast.LENGTH_SHORT).show();
+                    act.clearOverlays();
+                    act.switchTab(0);
+                });
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "无法加载参考图。" : e.getMessage();
+                uiHandler.post(() -> Toast.makeText(this, msg, Toast.LENGTH_LONG).show());
+            }
+        }, "jianyu-remote-ref").start();
+    }
+
     private void copyText(String text) {
         ClipboardManager cm = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         if (cm != null) {
@@ -1371,7 +2301,7 @@ public final class MainActivity extends Activity {
         }
     }
 
-    // ==================== 09 AirPods 风格四边留白悬浮玻璃更新卡 ====================
+    // ==================== AirPods 风格更新弹窗 ====================
 
     private void checkUpdate(boolean silent) {
         if (checkingUpdate) {
@@ -1380,14 +2310,15 @@ public final class MainActivity extends Activity {
         }
         checkingUpdate = true;
         if (!silent) Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show();
-        Handler main = new Handler(Looper.getMainLooper());
         new Thread(() -> {
             try {
                 UpdateManager.UpdateInfo info = UpdateManager.checkForUpdate();
-                main.post(() -> {
+                uiHandler.post(() -> {
                     checkingUpdate = false;
+                    availableUpdate = info.hasUpdate ? info : null;
                     MainActivity activity = visible;
                     if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+                    activity.refreshHomeDynamic();
                     if (info.hasUpdate) activity.showUpdateDialog(info);
                     else if (!silent) {
                         new AlertDialog.Builder(activity)
@@ -1399,7 +2330,7 @@ public final class MainActivity extends Activity {
                 });
             } catch (Exception e) {
                 String message = e.getMessage() == null ? "检查更新失败，请稍后重试。" : e.getMessage();
-                main.post(() -> {
+                uiHandler.post(() -> {
                     checkingUpdate = false;
                     MainActivity activity = visible;
                     if (silent || activity == null || activity.isFinishing() || activity.isDestroyed()) return;
@@ -1429,7 +2360,6 @@ public final class MainActivity extends Activity {
         handle.setBackground(UiKit.round(this, 0xFFCBD5E1, 3));
         sheet.addView(handle, new LinearLayout.LayoutParams(dp(38), dp(4)));
 
-        // 全新极光灯塔 Icon + 柔和虹彩光环
         FrameLayout iconHalo = new FrameLayout(this);
         GradientDrawable halo = new GradientDrawable(
                 GradientDrawable.Orientation.TL_BR,
@@ -1487,14 +2417,7 @@ public final class MainActivity extends Activity {
         sheet.addView(progressWrap, pwlp);
 
         wrapper.addView(sheet, new FrameLayout.LayoutParams(-1, -2));
-
-        AlertDialog dialog = new AlertDialog.Builder(this).setView(wrapper).create();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            window.setGravity(Gravity.BOTTOM);
-            window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.WRAP_CONTENT);
-        }
+        AlertDialog dialog = createBottomSheetDialog(wrapper);
 
         TextView updateBtnText = UiKit.text(this, "立即更新", 15, Color.WHITE, true);
         LinearLayout updateNow = new LinearLayout(this);
@@ -1529,16 +2452,15 @@ public final class MainActivity extends Activity {
     private void downloadAndInstall(AlertDialog dialog, UpdateManager.UpdateInfo info,
                                     ProgressBar bar, TextView progLabel, TextView progPct,
                                     LinearLayout updateNow, TextView updateBtnText, TextView later) {
-        Handler main = new Handler(Looper.getMainLooper());
         Context appContext = getApplicationContext();
         new Thread(() -> {
             try {
                 File apk = UpdateManager.downloadApk(appContext, info.downloadUrl, percent ->
-                        main.post(() -> {
+                        uiHandler.post(() -> {
                             bar.setProgress(percent);
                             progPct.setText(percent + "%");
                         }));
-                main.post(() -> {
+                uiHandler.post(() -> {
                     if (dialog.isShowing()) dialog.dismiss();
                     MainActivity activity = visible;
                     if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
@@ -1553,7 +2475,7 @@ public final class MainActivity extends Activity {
                 });
             } catch (Exception e) {
                 String message = e.getMessage() == null ? "安装包下载失败，请稍后重试。" : e.getMessage();
-                main.post(() -> {
+                uiHandler.post(() -> {
                     dialog.setCancelable(true);
                     updateNow.setEnabled(true);
                     updateBtnText.setText("重试下载");
@@ -1594,7 +2516,7 @@ public final class MainActivity extends Activity {
         slp.topMargin = dp(8);
         card.addView(sub, slp);
         LinearLayout btn = UiKit.prismButton(this, R.drawable.ic_sparkles, btnLabel, onAction);
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(dp(156), dp(44));
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(dp(164), dp(46));
         blp.topMargin = dp(16);
         card.addView(btn, blp);
         return card;
@@ -1609,20 +2531,23 @@ public final class MainActivity extends Activity {
     }
 
     private void generate() {
-        if (busy) return;
+        if (busy) {
+            openLoadingOverlay();
+            return;
+        }
         if (!service.isConfigured()) {
             new AlertDialog.Builder(this)
                     .setTitle("生图服务尚未连接")
                     .setMessage("当前可预览示例作品。应用接入服务后即可用自己的提示词生成图片。")
-                    .setPositiveButton("查看示例", (d, w) -> detail(""))
+                    .setPositiveButton("查看示例", (d, w) -> openDetailOverlay(""))
                     .setNegativeButton("返回", null)
                     .show();
             return;
         }
-        remember();
+        if (promptInput != null) draft = promptInput.getText().toString();
         String input = draft.trim();
         if (!service.hasPending() && (input.isEmpty() || input.codePointCount(0, input.length()) > 4000)) {
-            if (prompt != null) prompt.setError("请输入 1 至 4000 个字符的画面描述");
+            if (promptInput != null) promptInput.setError("请输入 1 至 4000 个字符的画面描述");
             return;
         }
         activePrompt = input;
@@ -1630,40 +2555,61 @@ public final class MainActivity extends Activity {
         activeRatio = ratios[ratio];
         activeHasRef = reference != null;
         String wireModel = wireModels[model];
+        final long seq = ++activeGenSeq;
         busy = true;
-        loading();
-        submit(service, input, wireModel, ratios[ratio], reference, isGrok() && nsfw);
+        genStartMillis = System.currentTimeMillis();
+        startGenTimer();
+        refreshHomeDynamic();
+        openLoadingOverlay();
+        submit(seq, service, input, wireModel, ratios[ratio], reference, isGrok() && nsfw);
     }
 
-    private static void submit(ImageService service, String input, String model, String ratio, Uri reference, boolean nsfw) {
+    private void startGenTimer() {
+        uiHandler.removeCallbacks(genTimerTick);
+        uiHandler.post(genTimerTick);
+    }
+
+    private static void submit(long seq, ImageService service, String input, String model, String ratio, Uri reference, boolean nsfw) {
         Handler main = new Handler(Looper.getMainLooper());
         new Thread(() -> {
             try {
                 String id = service.run(input, model, ratio, reference, nsfw);
-                main.post(() -> finished(id, null));
+                main.post(() -> finished(seq, id, null, false));
             } catch (Exception e) {
+                boolean wasCancelled = service.isCancelled();
                 String message = e instanceof java.net.SocketTimeoutException
                         || e instanceof java.net.SocketException
                         || e instanceof java.net.UnknownHostException
                         ? "网络连接中断，请先核对原任务记录。" : e.getMessage();
-                main.post(() -> finished(null, message == null ? "无法获取作品，请检查网络或服务连接。" : message));
+                main.post(() -> finished(seq, null, message == null ? "无法获取作品，请检查网络或服务连接。" : message, wasCancelled));
             }
         }, "jianyu-image").start();
     }
 
-    private static void finished(String id, String error) {
+    private static void finished(long seq, String id, String error, boolean wasCancelled) {
+        if (seq != activeGenSeq) return;
         busy = false;
         MainActivity activity = visible;
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+        activity.uiHandler.removeCallbacks(activity.genTimerTick);
+        boolean wasWatchingOrb = activity.isOverlayOpen("loading");
+        activity.popOverlaysByTag("loading");
+        activity.refreshHomeDynamic();
+        activity.refreshLibraryContent();
+        activity.updateFloatingBarsVisibility();
+        if (wasCancelled) return;
         if (error != null) {
-            activity.home();
             new AlertDialog.Builder(activity).setMessage(error).setPositiveButton("知道了", null).show();
-        } else if ("loading".equals(activity.screen)) activity.detail(id);
-        else if ("library".equals(activity.screen)) activity.library();
-        else if ("home".equals(activity.screen)) activity.home();
+        } else if (id != null) {
+            if (wasWatchingOrb) {
+                activity.openDetailOverlay(id);
+            } else {
+                Toast.makeText(activity, "新作品已绘制完成并存入作品库", Toast.LENGTH_LONG).show();
+            }
+        }
     }
 
-    // ==================== 数据与工具方法 ====================
+    // ==================== 工具方法 ====================
 
     private String[] listLocalArtworkIds() {
         String[] ids = new File(getFilesDir(), "images")
@@ -1699,20 +2645,10 @@ public final class MainActivity extends Activity {
         }
     }
 
-    private static long extractTimestamp(String id) {
-        int dash = id.indexOf('-');
-        if (dash <= 0) return 0L;
-        try { return Long.parseLong(id.substring(0, dash)); } catch (NumberFormatException e) { return 0L; }
-    }
-
-    private static long startOfDayMillis(long now) {
-        Calendar cal = Calendar.getInstance();
-        cal.setTimeInMillis(now);
-        cal.set(Calendar.HOUR_OF_DAY, 0);
-        cal.set(Calendar.MINUTE, 0);
-        cal.set(Calendar.SECOND, 0);
-        cal.set(Calendar.MILLISECOND, 0);
-        return cal.getTimeInMillis();
+    private static String formatBytes(long bytes) {
+        if (bytes <= 0) return "0 KB";
+        if (bytes >= 1024L * 1024L) return String.format(Locale.ROOT, "%.1f MB", bytes / (1024.0 * 1024.0));
+        return Math.max(1L, bytes / 1024L) + " KB";
     }
 
     @Override protected void onActivityResult(int code, int result, Intent intent) {
@@ -1720,7 +2656,7 @@ public final class MainActivity extends Activity {
         if (result != RESULT_OK || intent == null || intent.getData() == null) return;
         if (code == PICK_REFERENCE) {
             reference = intent.getData();
-            home();
+            refreshHomeDynamic();
             return;
         }
         if (code == SAVE_LOCAL_IMAGE) {
@@ -1740,7 +2676,6 @@ public final class MainActivity extends Activity {
             Uri dest = intent.getData();
             String url = activeInspiration.imageUrl;
             Toast.makeText(this, "正在保存原图…", Toast.LENGTH_SHORT).show();
-            Handler main = new Handler(Looper.getMainLooper());
             Context appContext = getApplicationContext();
             new Thread(() -> {
                 try {
@@ -1750,18 +2685,23 @@ public final class MainActivity extends Activity {
                         if (out == null) throw new IOException();
                         ImageService.copy(in, out, ImageService.IMAGE_LIMIT, "作品文件过大。");
                     }
-                    main.post(() -> Toast.makeText(this, "原图已保存", Toast.LENGTH_SHORT).show());
+                    uiHandler.post(() -> Toast.makeText(this, "原图已保存", Toast.LENGTH_SHORT).show());
                 } catch (Exception e) {
-                    main.post(() -> Toast.makeText(this, "保存失败，请稍后重试。", Toast.LENGTH_LONG).show());
+                    uiHandler.post(() -> Toast.makeText(this, "保存失败，请稍后重试。", Toast.LENGTH_LONG).show());
                 }
             }, "jianyu-save-remote").start();
         }
     }
 
     @Override public void onBackPressed() {
-        if ("home".equals(screen)) super.onBackPressed();
-        else if ("inspire_detail".equals(screen)) inspire();
-        else if ("detail".equals(screen) && !current.isEmpty()) library();
-        else home();
+        if (!overlayStack.isEmpty()) {
+            popOverlay();
+        } else if (activeTab == 2 && librarySelectMode) {
+            exitLibrarySelectMode();
+        } else if (activeTab != 0) {
+            switchTab(0);
+        } else {
+            super.onBackPressed();
+        }
     }
 }
