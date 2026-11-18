@@ -1,0 +1,6 @@
+{
+  "versionCode": 2,
+  "versionName": "0.2.0",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.2.0/Jianyu-v0.2.0.apk",
+  "releaseNotes": "1. 新增应用内检查更新，支持一键下载与覆盖安装。\n2. 启用固定应用签名，后续升级无需卸载、保留本地作品库。\n3. 支持内置多密钥轮询、Grok NSFW 开关、按模型尺寸映射及错误详情提示。"
+}

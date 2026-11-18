@@ -11,7 +11,12 @@
 
 如果网页上传忽略了 `.github` 文件夹，在仓库首页点 **Add file → Create new file**。文件名填 `.github/workflows/android.yml`，用记事本打开项目内同名文件，将全部内容粘贴进去并提交。工作流会在该次提交后自动启动。
 
-工作流在 GitHub 托管的 Ubuntu 环境运行，使用 Java 17、Gradle 8.9、Android Gradle Plugin 8.7.3 和 Android SDK 35。APK 使用调试签名，适合安装体验。不同构建的调试签名可能变化，需要长期覆盖升级或发布时请使用自己的固定签名。
+工作流在 GitHub 托管的 Ubuntu 环境运行，使用 Java 17、Gradle 8.9、Android Gradle Plugin 8.7.3 和 Android SDK 35，并使用仓库内固定签名 `debug.keystore` 打包，支持应用内覆盖升级而不丢失本地作品库。
+
+## 应用内检查更新与发版
+
+- **应用内更新**：App 启动时静默检查更新，也可在创作页右上角点击 `vX.Y.Z · 检查更新` 手动检查。优先通过 jsDelivr CDN / Raw GitHub 读取 `version.json`，并配备 GitHub Releases 302 探针与官方 API 兜底；下载 APK 支持官方直链与 `ghfast.top` 镜像自动回退，完成后通过 `FileProvider` 调起系统安装器覆盖安装。
+- **发布新版本**：修改仓库根目录 `version.json`（递增 `versionCode`、更新 `versionName`、`downloadUrl` 与 `releaseNotes`）并推送到 `main`，GitHub Actions 会自动编译、校验、发布 GitHub Release 并刷新 jsDelivr 缓存。
 
 ## 连接皮皮智绘生图 API
 

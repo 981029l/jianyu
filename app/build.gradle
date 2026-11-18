@@ -1,4 +1,8 @@
+import groovy.json.JsonSlurper
+
 plugins { id 'com.android.application' }
+
+def versionMeta = new JsonSlurper().parse(rootProject.file('version.json'))
 
 android {
     namespace 'studio.jianyu.app'
@@ -7,8 +11,8 @@ android {
         applicationId 'studio.jianyu.app'
         minSdk 26
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
+        versionCode versionMeta.versionCode as int
+        versionName versionMeta.versionName as String
         def endpoint = providers.environmentVariable('JIANYU_IMAGE_ENDPOINT').getOrElse('').trim()
         if (endpoint) {
             def uri = new URI(endpoint)
@@ -21,9 +25,30 @@ android {
                 providers.environmentVariable('IMAGE_API_KEY').getOrElse('')).trim()
         buildConfigField 'String', 'IMAGE_API_KEYS', groovy.json.JsonOutput.toJson(apiKeys)
     }
+    signingConfigs {
+        debug {
+            storeFile rootProject.file('debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
     buildFeatures { buildConfig true }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.13.1'
 }

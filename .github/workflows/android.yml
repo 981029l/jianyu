@@ -1,9 +1,10 @@
 name: Build Android APK
 on:
   push:
+    branches: [ "main" ]
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   apk:
     runs-on: ubuntu-24.04
@@ -19,15 +20,60 @@ jobs:
           gradle-version: '8.9'
       - name: Prepare Android SDK
         run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;34.0.0"'
-      - name: Assemble debug APK
+      - name: Read version metadata
+        id: meta
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          meta = json.loads(pathlib.Path('version.json').read_text(encoding='utf-8'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as out:
+              out.write(f"version_code={meta['versionCode']}\n")
+              out.write(f"version_name={meta['versionName']}\n")
+          pathlib.Path('release-notes.txt').write_text(meta.get('releaseNotes', '').strip() + '\n', encoding='utf-8')
+          PY
+      - name: Assemble release APK
         env:
           JIANYU_IMAGE_ENDPOINT: ${{ vars.JIANYU_IMAGE_ENDPOINT }}
           IMAGE_API_KEYS: ${{ secrets.IMAGE_API_KEYS }}
-        run: gradle --no-daemon :app:assembleDebug
-      - name: Verify APK signature
-        run: '"$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose app/build/outputs/apk/debug/app-debug.apk'
+        run: gradle --no-daemon :app:assembleRelease
+      - name: Package and verify APK
+        run: |
+          mkdir -p release_apk
+          APK_NAME="Jianyu-v${{ steps.meta.outputs.version_name }}.apk"
+          cp app/build/outputs/apk/release/*.apk "release_apk/$APK_NAME"
+          BUILD_TOOLS="$ANDROID_HOME/build-tools/34.0.0"
+          "$BUILD_TOOLS/apksigner" verify --verbose --print-certs "release_apk/$APK_NAME"
+          "$BUILD_TOOLS/aapt" dump badging "release_apk/$APK_NAME" > apk-badging.txt
+          python3 - <<'PY'
+          import json, pathlib
+          meta = json.loads(pathlib.Path('version.json').read_text(encoding='utf-8'))
+          badging = pathlib.Path('apk-badging.txt').read_text(encoding='utf-8')
+          assert "name='studio.jianyu.app'" in badging, badging
+          assert f"versionCode='{meta['versionCode']}'" in badging, badging
+          assert f"versionName='{meta['versionName']}'" in badging, badging
+          expected_url = f"https://github.com/981029l/jianyu/releases/download/v{meta['versionName']}/Jianyu-v{meta['versionName']}.apk"
+          assert meta['downloadUrl'] == expected_url, f"downloadUrl mismatch: {meta['downloadUrl']} != {expected_url}"
+          print(badging.splitlines()[0])
+          PY
+          cd release_apk
+          sha256sum "$APK_NAME" > SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: Jianyu-debug-apk
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: Jianyu-Release-APK
+          path: release_apk/*
           if-no-files-found: error
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: v${{ steps.meta.outputs.version_name }}
+          target_commitish: ${{ github.sha }}
+          name: "见屿 v${{ steps.meta.outputs.version_name }}"
+          body_path: release-notes.txt
+          files: release_apk/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Purge jsDelivr CDN cache
+        if: github.ref == 'refs/heads/main'
+        run: |
+          curl -s https://purge.jsdelivr.net/gh/981029l/jianyu@main/version.json || true

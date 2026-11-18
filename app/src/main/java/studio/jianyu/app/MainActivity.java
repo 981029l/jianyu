@@ -30,6 +30,8 @@ public final class MainActivity extends Activity {
     private boolean nsfw;
     private String[] models, wireModels, ratios;
     private static boolean busy;
+    private static boolean checkingUpdate;
+    private static boolean autoCheckedUpdate;
     private static MainActivity visible;
     private static final int PICK_REFERENCE = 2;
     private Uri reference;
@@ -52,6 +54,10 @@ public final class MainActivity extends Activity {
         else if (state != null && "library".equals(state.getString("screen"))) library();
         else if (state != null && "loading".equals(state.getString("screen")) && busy) loading();
         else home();
+        if (!autoCheckedUpdate) {
+            autoCheckedUpdate = true;
+            checkUpdate(true);
+        }
     }
     @Override protected void onStart() {
         super.onStart(); visible = this;
@@ -95,7 +101,127 @@ public final class MainActivity extends Activity {
         });
         setContentView(root);ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);
         root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);page.setPadding(dp(22),dp(19),dp(22),dp(22));scroll.addView(page);
-        add(text("见屿",14,BLUE,true),-2,0);add(text(title,34,INK,true),-2,9);
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.addView(text("见屿", 14, BLUE, true), new LinearLayout.LayoutParams(0, -2, 1));
+        if ("home".equals(name)) {
+            TextView updateBtn = text("v" + BuildConfig.VERSION_NAME + " · 检查更新", 12, MUTED, true);
+            updateBtn.setBackground(box(SOFT, 12));
+            updateBtn.setPadding(dp(10), dp(5), dp(10), dp(5));
+            updateBtn.setFocusable(true);
+            updateBtn.setOnClickListener(v -> checkUpdate(false));
+            header.addView(updateBtn);
+        }
+        add(header, -2, 0);
+        add(text(title,34,INK,true),-2,9);
+    }
+    private void checkUpdate(boolean silent) {
+        if (checkingUpdate) {
+            if (!silent) Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        checkingUpdate = true;
+        if (!silent) Toast.makeText(this, "正在检查更新…", Toast.LENGTH_SHORT).show();
+        Handler main = new Handler(Looper.getMainLooper());
+        new Thread(() -> {
+            try {
+                UpdateManager.UpdateInfo info = UpdateManager.checkForUpdate();
+                main.post(() -> {
+                    checkingUpdate = false;
+                    MainActivity activity = visible;
+                    if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+                    if (info.hasUpdate) activity.showUpdateDialog(info);
+                    else if (!silent) {
+                        new AlertDialog.Builder(activity)
+                                .setTitle("已是最新版本")
+                                .setMessage("当前版本 v" + info.currentVersion + " 已经是最新版本。")
+                                .setPositiveButton("知道了", null)
+                                .show();
+                    }
+                });
+            } catch (Exception e) {
+                String message = e.getMessage() == null ? "检查更新失败，请稍后重试。" : e.getMessage();
+                main.post(() -> {
+                    checkingUpdate = false;
+                    MainActivity activity = visible;
+                    if (silent || activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+                    new AlertDialog.Builder(activity)
+                            .setTitle("检查更新失败")
+                            .setMessage(message)
+                            .setPositiveButton("重试", (d, w) -> activity.checkUpdate(false))
+                            .setNegativeButton("关闭", null)
+                            .show();
+                });
+            }
+        }, "jianyu-update-check").start();
+    }
+    private void showUpdateDialog(UpdateManager.UpdateInfo info) {
+        String body = "当前版本：v" + info.currentVersion + "\n最新版本：v" + info.latestVersion
+                + "\n\n更新内容：\n" + info.releaseNotes;
+        new AlertDialog.Builder(this)
+                .setTitle("发现新版本 v" + info.latestVersion)
+                .setMessage(body)
+                .setPositiveButton("立即更新", (d, w) -> startUpdateDownload(info))
+                .setNegativeButton("稍后再说", null)
+                .show();
+    }
+    private void startUpdateDownload(UpdateManager.UpdateInfo info) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(22), dp(14), dp(22), dp(10));
+        TextView statusText = text("正在下载新版本 v" + info.latestVersion + "… 0%", 14, INK, false);
+        box.addView(statusText);
+        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(100);
+        bar.setProgress(0);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
+        lp.topMargin = dp(12);
+        box.addView(bar, lp);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("下载更新")
+                .setView(box)
+                .setCancelable(false)
+                .create();
+        dialog.show();
+
+        Handler main = new Handler(Looper.getMainLooper());
+        android.content.Context appContext = getApplicationContext();
+        new Thread(() -> {
+            try {
+                File apk = UpdateManager.downloadApk(appContext, info.downloadUrl, percent ->
+                        main.post(() -> {
+                            bar.setProgress(percent);
+                            statusText.setText("正在下载新版本 v" + info.latestVersion + "… " + percent + "%");
+                        }));
+                main.post(() -> {
+                    if (dialog.isShowing()) dialog.dismiss();
+                    MainActivity activity = visible;
+                    if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+                    if (!UpdateManager.installApk(activity, apk)) {
+                        new AlertDialog.Builder(activity)
+                                .setTitle("新版本已下载")
+                                .setMessage("授权“允许安装未知应用”后，点击下方按钮即可覆盖安装 v" + info.latestVersion + "。")
+                                .setPositiveButton("立即安装", (d, w) -> UpdateManager.installApk(activity, apk))
+                                .setNegativeButton("稍后", null)
+                                .show();
+                    }
+                });
+            } catch (Exception e) {
+                String message = e.getMessage() == null ? "安装包下载失败，请稍后重试。" : e.getMessage();
+                main.post(() -> {
+                    if (dialog.isShowing()) dialog.dismiss();
+                    MainActivity activity = visible;
+                    if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+                    new AlertDialog.Builder(activity)
+                            .setTitle("下载失败")
+                            .setMessage(message)
+                            .setPositiveButton("重试", (d, w) -> activity.startUpdateDownload(info))
+                            .setNegativeButton("取消", null)
+                            .show();
+                });
+            }
+        }, "jianyu-update-download").start();
     }
     private void nav() {
         LinearLayout tabs=new LinearLayout(this);tabs.setPadding(dp(14),dp(5),dp(14),dp(6));root.addView(tabs);
