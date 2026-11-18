@@ -308,6 +308,10 @@ final class UiKit {
     }
 
     static LinearLayout segmentedControl(Context context, String[] labels, int activeIndex, IndexClick listener) {
+        return segmentedControl(context, labels, activeIndex, 13.5f, listener);
+    }
+
+    static LinearLayout segmentedControl(Context context, String[] labels, int activeIndex, float textSize, IndexClick listener) {
         LinearLayout bar = new LinearLayout(context);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setBackground(card(context, 0xE2E9F0FA, 0xE6FFFFFF, 22));
@@ -316,8 +320,9 @@ final class UiKit {
         for (int i = 0; i < labels.length; i++) {
             final int idx = i;
             boolean active = i == activeIndex;
-            TextView item = text(context, labels[i], 13.5f, active ? BLUE : MUTED, true);
+            TextView item = text(context, labels[i], textSize, active ? BLUE : MUTED, true);
             item.setGravity(Gravity.CENTER);
+            item.setSingleLine(true);
             if (active) {
                 item.setBackground(round(context, CARD, 18));
                 applySoftShadow(item, context, 3, 0x26182638);

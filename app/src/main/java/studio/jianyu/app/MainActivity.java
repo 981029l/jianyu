@@ -69,10 +69,10 @@ public final class MainActivity extends Activity {
     private TextView miniGenText;
     private LinearLayout libraryBatchBar;
     private TextView libraryBatchCount;
-    private View[] tabContainers = new View[3];
-    private LinearLayout[] navItems = new LinearLayout[3];
-    private ImageView[] navIcons = new ImageView[3];
-    private TextView[] navLabels = new TextView[3];
+    private View[] tabContainers = new View[4];
+    private LinearLayout[] navItems = new LinearLayout[4];
+    private ImageView[] navIcons = new ImageView[4];
+    private TextView[] navLabels = new TextView[4];
     private final List<OverlayEntry> overlayStack = new ArrayList<>();
 
     // 首页持久化控件
@@ -89,18 +89,27 @@ public final class MainActivity extends Activity {
     private ImageView ctaIconView;
     private LinearLayout homeRecentSlot;
 
-    // 灵感页持久化控件
-    private LinearLayout inspireSegHolder;
-    private LinearLayout galleryToolsBox;
-    private EditText gallerySearchInput;
-    private View gallerySearchClear;
-    private LinearLayout galleryMajorsRow;
-    private TextView galleryCountLabel;
-    private SwipeRefreshLayout inspireSwipe;
-    private RecyclerView inspireRecycler;
-    private FrameLayout inspireStateBox;
-    private GalleryAdapters.InspirationAdapter inspirationAdapter;
-    private String builtMajorsSignature = "";
+    // 提示词工坊持久化控件 (Tab 1)
+    private LinearLayout promptSourceSegHolder;
+    private int promptSourceIndex = 0; // 0: 全部, 1: 热榜图鉴, 2: 设计精选, 3: 经典画廊, 4: 我的收藏
+    private EditText promptSearchInput;
+    private View promptSearchClear;
+    private LinearLayout promptMajorsRow;
+    private TextView promptCountLabel;
+    private SwipeRefreshLayout promptSwipe;
+    private RecyclerView promptRecycler;
+    private FrameLayout promptStateBox;
+    private GalleryAdapters.InspirationAdapter promptAdapter;
+    private String promptMajor = "全部";
+    private String promptQuery = "";
+    private int promptVisibleCount = GALLERY_PAGE_SIZE;
+    private String builtPromptMajorsSignature = "";
+
+    // 创意广场持久化控件 (Tab 2)
+    private SwipeRefreshLayout plazaSwipe;
+    private RecyclerView plazaRecycler;
+    private FrameLayout plazaStateBox;
+    private GalleryAdapters.InspirationAdapter plazaAdapter;
 
     // 作品库持久化控件
     private TextView librarySubtitleView;
@@ -129,7 +138,7 @@ public final class MainActivity extends Activity {
     };
 
     // 状态字段
-    private int activeTab = 0; // 0: 创作, 1: 灵感, 2: 作品库
+    private int activeTab = 0; // 0: 创作, 1: 提示词, 2: 广场, 3: 作品库
     private boolean imeVisible = false;
     private String draft = "", current = "";
     private int selectedRoute = 0; // 0: 线路 1, 1: 线路 2
@@ -141,11 +150,6 @@ public final class MainActivity extends Activity {
     private int libraryFilter = 0; // 0: 全部, 1: GPT, 2: Grok
     private boolean librarySelectMode = false;
     private final Set<String> librarySelected = new LinkedHashSet<>();
-
-    private int inspireSubTab = 0; // 0: 创意广场, 1: 提示词画廊, 2: 收藏
-    private String galleryMajor = "全部";
-    private String galleryQuery = "";
-    private int galleryVisibleCount = GALLERY_PAGE_SIZE;
 
     private String[] routes, modelsLine1, wireModelsLine1, modelsLine2, wireModelsLine2, ratios;
     private Uri reference;
@@ -203,10 +207,10 @@ public final class MainActivity extends Activity {
             activeTab = state.getInt("activeTab", 0);
             libraryFilter = state.getInt("libraryFilter", 0);
             librarySubTab = state.getInt("librarySubTab", 0);
-            inspireSubTab = state.getInt("inspireSubTab", 0);
-            galleryMajor = state.getString("galleryMajor", "全部");
-            galleryQuery = state.getString("galleryQuery", "");
-            galleryVisibleCount = state.getInt("galleryVisibleCount", GALLERY_PAGE_SIZE);
+            promptSourceIndex = state.getInt("promptSourceIndex", 0);
+            promptMajor = state.getString("promptMajor", "全部");
+            promptQuery = state.getString("promptQuery", "");
+            promptVisibleCount = state.getInt("promptVisibleCount", GALLERY_PAGE_SIZE);
             if (state.containsKey("reference")) reference = Uri.parse(state.getString("reference"));
         }
 
@@ -264,10 +268,10 @@ public final class MainActivity extends Activity {
         state.putInt("activeTab", activeTab);
         state.putInt("libraryFilter", libraryFilter);
         state.putInt("librarySubTab", librarySubTab);
-        state.putInt("inspireSubTab", inspireSubTab);
-        state.putString("galleryMajor", galleryMajor);
-        state.putString("galleryQuery", galleryQuery);
-        state.putInt("galleryVisibleCount", galleryVisibleCount);
+        state.putInt("promptSourceIndex", promptSourceIndex);
+        state.putString("promptMajor", promptMajor);
+        state.putString("promptQuery", promptQuery);
+        state.putInt("promptVisibleCount", promptVisibleCount);
         if (reference != null) state.putString("reference", reference.toString());
         state.putString("current", current);
     }
@@ -423,16 +427,17 @@ public final class MainActivity extends Activity {
         root.addView(tabHost, new FrameLayout.LayoutParams(-1, -1));
 
         tabContainers[0] = buildHomeTab();
-        tabContainers[1] = buildInspireTab();
-        tabContainers[2] = buildLibraryTab();
+        tabContainers[1] = buildPromptTab();
+        tabContainers[2] = buildPlazaTab();
+        tabContainers[3] = buildLibraryTab();
         for (View tab : tabContainers) {
             tab.setVisibility(View.GONE);
             tabHost.addView(tab, new FrameLayout.LayoutParams(-1, -1));
         }
 
-        // 悬浮 3-Tab 药丸底栏
+        // 悬浮 4-Tab 药丸底栏
         floatingNav = buildFloatingTabBar();
-        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(dp(296), -2);
+        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(dp(336), -2);
         navLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
         navLp.bottomMargin = dp(14);
         root.addView(floatingNav, navLp);
@@ -469,17 +474,17 @@ public final class MainActivity extends Activity {
         pill.setGravity(Gravity.CENTER_VERTICAL);
         pill.setBackground(UiKit.floatingPillBg(this, 34));
         UiKit.applySoftShadow(pill, this, 14, 0x36182638);
-        pill.setPadding(dp(8), dp(6), dp(8), dp(6));
+        pill.setPadding(dp(6), dp(5), dp(6), dp(5));
 
-        int[] iconRes = {R.drawable.ic_sparkles, R.drawable.ic_compass, R.drawable.ic_images};
-        String[] labels = {"创作", "灵感", "作品库"};
+        int[] iconRes = {R.drawable.ic_sparkles, R.drawable.ic_wand, R.drawable.ic_compass, R.drawable.ic_images};
+        String[] labels = {"创作", "提示词", "广场", "作品"};
 
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             final int idx = i;
             LinearLayout item = new LinearLayout(this);
             item.setOrientation(LinearLayout.VERTICAL);
             item.setGravity(Gravity.CENTER);
-            item.setPadding(dp(12), dp(7), dp(12), dp(7));
+            item.setPadding(dp(8), dp(6), dp(8), dp(6));
             item.setMinimumHeight(dp(48));
             item.setFocusable(true);
             MotionKit.attachPressSpring(item, 0.94f);
@@ -497,7 +502,7 @@ public final class MainActivity extends Activity {
             navLabels[i] = lbl;
 
             LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(0, -2, 1);
-            if (i > 0) tlp.leftMargin = dp(4);
+            if (i > 0) tlp.leftMargin = dp(3);
             pill.addView(item, tlp);
         }
         return pill;
@@ -552,11 +557,11 @@ public final class MainActivity extends Activity {
 
     private void switchTab(int index) {
         hideKeyboard();
-        if (activeTab == 2 && index != 2 && librarySelectMode) {
+        if (activeTab == 3 && index != 3 && librarySelectMode) {
             exitLibrarySelectMode();
         }
         activeTab = index;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < 4; i++) {
             boolean active = (i == index);
             tabContainers[i].setVisibility(active ? View.VISIBLE : View.GONE);
             navItems[i].setBackground(active ? UiKit.round(this, UiKit.BLUE_SOFT, 26) : null);
@@ -570,14 +575,15 @@ public final class MainActivity extends Activity {
             }
         }
         if (index == 0) refreshHomeDynamic();
-        else if (index == 1) refreshInspireTab(false);
-        else if (index == 2) refreshLibraryContent();
+        else if (index == 1) refreshPromptTab(false);
+        else if (index == 2) refreshPlazaTab(false);
+        else if (index == 3) refreshLibraryContent();
         updateFloatingBarsVisibility();
     }
 
     private void updateFloatingBarsVisibility() {
         boolean hasOverlay = !overlayStack.isEmpty();
-        boolean showBatch = !hasOverlay && !imeVisible && activeTab == 2 && librarySelectMode && librarySubTab == 0;
+        boolean showBatch = !hasOverlay && !imeVisible && activeTab == 3 && librarySelectMode && librarySubTab == 0;
         boolean showNav = !hasOverlay && !imeVisible && !showBatch;
         MotionKit.animateFloatingBar(floatingNav, showNav, 80);
         MotionKit.animateFloatingBar(libraryBatchBar, showBatch, 80);
@@ -1284,8 +1290,11 @@ public final class MainActivity extends Activity {
         safeSwitch.setOnCheckedChangeListener((b, checked) -> {
             safeBrowse = checked;
             prefs.edit().putBoolean(KEY_SAFE_BROWSE, checked).apply();
-            if (inspirationAdapter != null) {
-                inspirationAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+            if (promptAdapter != null) {
+                promptAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+            }
+            if (plazaAdapter != null) {
+                plazaAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
             }
         });
         LinearLayout safeRow = settingsItemRow(
@@ -1312,7 +1321,7 @@ public final class MainActivity extends Activity {
                 service.clearAllCaches();
                 galleryData = null;
                 uiHandler.post(() -> {
-                    builtMajorsSignature = "";
+                    builtPromptMajorsSignature = "";
                     cacheSub.setText("已占用 0 KB（已清理完成）");
                     Toast.makeText(this, "缓存已清理", Toast.LENGTH_SHORT).show();
                 });
@@ -1377,9 +1386,19 @@ public final class MainActivity extends Activity {
         return dialog;
     }
 
-    // ==================== Tab 1: 灵感频道（RecyclerView + 下拉刷新 + 自动分页 + 收藏） ====================
+    // ==================== Tab 1: 提示词工坊（3 大来源区分 + 分类过滤 + 搜索 + 瀑布流） ====================
 
-    private View buildInspireTab() {
+    private static String promptSourceTag(int index) {
+        switch (index) {
+            case 1: return "hot";
+            case 2: return "addon";
+            case 3: return "gallery";
+            case 4: return "fav";
+            default: return "all";
+        }
+    }
+
+    private View buildPromptTab() {
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
 
@@ -1387,20 +1406,16 @@ public final class MainActivity extends Activity {
         headerPad.setOrientation(LinearLayout.VERTICAL);
         headerPad.setPadding(dp(18), dp(14), dp(18), dp(8));
 
-        // 去掉重复的品牌眉标，采用苹果原生大标题「灵感」
-        headerPad.addView(UiKit.pageTitleHeader(this, "灵感", null, null));
+        headerPad.addView(UiKit.pageTitleHeader(this, "提示词工坊", "13,780+ 精选提示词 · 离线秒开", null));
 
-        inspireSegHolder = new LinearLayout(this);
-        inspireSegHolder.setOrientation(LinearLayout.VERTICAL);
+        // 来源分段切换条：[ 全部 | 热榜图鉴 | 设计精选 | 经典画廊 | 收藏 ]
+        promptSourceSegHolder = new LinearLayout(this);
+        promptSourceSegHolder.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams shlp = new LinearLayout.LayoutParams(-1, -2);
         shlp.topMargin = dp(12);
-        headerPad.addView(inspireSegHolder, shlp);
+        headerPad.addView(promptSourceSegHolder, shlp);
 
-        // 提示词画廊专属工具栏（持久化搜索栏 + 清洗后的分类胶囊）
-        galleryToolsBox = new LinearLayout(this);
-        galleryToolsBox.setOrientation(LinearLayout.VERTICAL);
-        galleryToolsBox.setVisibility(View.GONE);
-
+        // 搜索栏
         LinearLayout searchBar = new LinearLayout(this);
         searchBar.setOrientation(LinearLayout.HORIZONTAL);
         searchBar.setGravity(Gravity.CENTER_VERTICAL);
@@ -1409,93 +1424,86 @@ public final class MainActivity extends Activity {
         searchBar.setPadding(dp(14), dp(4), dp(8), dp(4));
         searchBar.addView(UiKit.icon(this, R.drawable.ic_search, 16, UiKit.MUTED));
 
-        gallerySearchInput = new EditText(this);
-        gallerySearchInput.setSingleLine(true);
-        gallerySearchInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
-        gallerySearchInput.setBackground(null);
-        gallerySearchInput.setTextSize(13.5f);
-        gallerySearchInput.setTextColor(UiKit.INK);
-        gallerySearchInput.setHintTextColor(0xFF94A3B8);
-        gallerySearchInput.setHint("搜索 5,443 条提示词、风格、分类…");
-        gallerySearchInput.setText(galleryQuery);
-        gallerySearchInput.setOnEditorActionListener((v, actionId, event) -> {
-            applyGallerySearch();
+        promptSearchInput = new EditText(this);
+        promptSearchInput.setSingleLine(true);
+        promptSearchInput.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        promptSearchInput.setBackground(null);
+        promptSearchInput.setTextSize(13.5f);
+        promptSearchInput.setTextColor(UiKit.INK);
+        promptSearchInput.setHintTextColor(0xFF94A3B8);
+        promptSearchInput.setHint("搜索 13,780+ 条提示词、风格、分类…");
+        promptSearchInput.setText(promptQuery);
+        promptSearchInput.setOnEditorActionListener((v, actionId, event) -> {
+            applyPromptSearch();
             return true;
         });
-        gallerySearchInput.addTextChangedListener(new TextWatcher() {
+        promptSearchInput.addTextChangedListener(new TextWatcher() {
             @Override public void beforeTextChanged(CharSequence s, int start, int count, int after) {}
             @Override public void onTextChanged(CharSequence s, int start, int before, int count) {}
             @Override public void afterTextChanged(Editable s) {
-                if (gallerySearchClear != null) {
-                    gallerySearchClear.setVisibility(s.length() > 0 ? View.VISIBLE : View.GONE);
+                if (promptSearchClear != null) {
+                    promptSearchClear.setVisibility(s.length() > 0 ? View.VISIBLE : View.GONE);
                 }
             }
         });
         LinearLayout.LayoutParams sip = new LinearLayout.LayoutParams(0, dp(38), 1);
         sip.leftMargin = dp(8);
-        searchBar.addView(gallerySearchInput, sip);
+        searchBar.addView(promptSearchInput, sip);
 
         LinearLayout clr = new LinearLayout(this);
         clr.setGravity(Gravity.CENTER);
         clr.setPadding(dp(8), dp(8), dp(8), dp(8));
         clr.addView(UiKit.icon(this, R.drawable.ic_close, 14, UiKit.MUTED));
-        clr.setVisibility(galleryQuery.isEmpty() ? View.GONE : View.VISIBLE);
+        clr.setVisibility(promptQuery.isEmpty() ? View.GONE : View.VISIBLE);
         clr.setOnClickListener(v -> {
-            gallerySearchInput.setText("");
-            applyGallerySearch();
+            promptSearchInput.setText("");
+            applyPromptSearch();
         });
-        gallerySearchClear = clr;
+        promptSearchClear = clr;
         searchBar.addView(clr);
 
         TextView goBtn = UiKit.text(this, "搜索", 12, Color.WHITE, true);
         goBtn.setBackground(UiKit.round(this, UiKit.BLUE, 15));
         goBtn.setPadding(dp(12), dp(7), dp(12), dp(7));
-        goBtn.setOnClickListener(v -> applyGallerySearch());
+        goBtn.setOnClickListener(v -> applyPromptSearch());
         searchBar.addView(goBtn);
 
         LinearLayout.LayoutParams sblp = new LinearLayout.LayoutParams(-1, -2);
         sblp.topMargin = dp(10);
-        galleryToolsBox.addView(searchBar, sblp);
+        headerPad.addView(searchBar, sblp);
 
+        // 分类横滑胶囊条
         HorizontalScrollView chipsScroll = new HorizontalScrollView(this);
         chipsScroll.setHorizontalScrollBarEnabled(false);
-        galleryMajorsRow = new LinearLayout(this);
-        galleryMajorsRow.setOrientation(LinearLayout.HORIZONTAL);
-        chipsScroll.addView(galleryMajorsRow);
+        promptMajorsRow = new LinearLayout(this);
+        promptMajorsRow.setOrientation(LinearLayout.HORIZONTAL);
+        chipsScroll.addView(promptMajorsRow);
         LinearLayout.LayoutParams cslp = new LinearLayout.LayoutParams(-1, -2);
         cslp.topMargin = dp(10);
-        galleryToolsBox.addView(chipsScroll, cslp);
+        headerPad.addView(chipsScroll, cslp);
 
-        galleryCountLabel = UiKit.text(this, "", 11.5f, UiKit.MUTED, false);
+        promptCountLabel = UiKit.text(this, "", 11.5f, UiKit.MUTED, false);
         LinearLayout.LayoutParams gclp = new LinearLayout.LayoutParams(-1, -2);
         gclp.topMargin = dp(8);
-        galleryToolsBox.addView(galleryCountLabel, gclp);
+        headerPad.addView(promptCountLabel, gclp);
 
-        headerPad.addView(galleryToolsBox, new LinearLayout.LayoutParams(-1, -2));
         wrap.addView(headerPad, new LinearLayout.LayoutParams(-1, -2));
 
         // 瀑布流内容区 + 下拉刷新 + 空态覆盖
         FrameLayout body = new FrameLayout(this);
-        inspireSwipe = new SwipeRefreshLayout(this);
-        inspireSwipe.setColorSchemeColors(UiKit.BLUE);
-        inspireSwipe.setOnRefreshListener(() -> {
-            if (inspireSubTab == 0) fetchPlaza(true);
-            else if (inspireSubTab == 1) fetchGallery(true);
-            else {
-                refreshInspireTab(false);
-                inspireSwipe.setRefreshing(false);
-            }
-        });
+        promptSwipe = new SwipeRefreshLayout(this);
+        promptSwipe.setColorSchemeColors(UiKit.BLUE);
+        promptSwipe.setOnRefreshListener(() -> fetchGallery(true));
 
-        inspireRecycler = new RecyclerView(this);
+        promptRecycler = new RecyclerView(this);
         StaggeredGridLayoutManager sglm = new StaggeredGridLayoutManager(2, StaggeredGridLayoutManager.VERTICAL);
         sglm.setGapStrategy(StaggeredGridLayoutManager.GAP_HANDLING_MOVE_ITEMS_BETWEEN_SPANS);
-        inspireRecycler.setLayoutManager(sglm);
-        inspireRecycler.setPadding(dp(13), dp(6), dp(13), dp(112));
-        inspireRecycler.setClipToPadding(false);
-        inspireRecycler.setItemAnimator(null);
+        promptRecycler.setLayoutManager(sglm);
+        promptRecycler.setPadding(dp(13), dp(6), dp(13), dp(112));
+        promptRecycler.setClipToPadding(false);
+        promptRecycler.setItemAnimator(null);
 
-        inspirationAdapter = new GalleryAdapters.InspirationAdapter(this, new GalleryAdapters.InspirationListener() {
+        promptAdapter = new GalleryAdapters.InspirationAdapter(this, new GalleryAdapters.InspirationListener() {
             @Override public void onItemClick(InspirationRepository.Item item) {
                 openInspireDetailOverlay(item);
             }
@@ -1505,14 +1513,15 @@ public final class MainActivity extends Activity {
             @Override public void onFavoriteToggle(InspirationRepository.Item item) {
                 boolean added = InspirationRepository.toggleFavorite(MainActivity.this, item);
                 Toast.makeText(MainActivity.this, added ? "已加入灵感收藏" : "已取消收藏", Toast.LENGTH_SHORT).show();
-                if (inspireSubTab == 2) refreshInspireTab(false);
-                else inspirationAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+                if (promptSourceIndex == 4) refreshPromptTab(false);
+                else promptAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+                if (plazaAdapter != null) plazaAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
             }
         });
-        inspireRecycler.setAdapter(inspirationAdapter);
+        promptRecycler.setAdapter(promptAdapter);
 
         // 触底自动分页加载
-        inspireRecycler.addOnScrollListener(new RecyclerView.OnScrollListener() {
+        promptRecycler.addOnScrollListener(new RecyclerView.OnScrollListener() {
             @Override public void onScrolled(RecyclerView rv, int dx, int dy) {
                 if (dy <= 0) return;
                 StaggeredGridLayoutManager lm = (StaggeredGridLayoutManager) rv.getLayoutManager();
@@ -1520,156 +1529,261 @@ public final class MainActivity extends Activity {
                 int[] lastPositions = lm.findLastVisibleItemPositions(null);
                 int maxLast = 0;
                 for (int p : lastPositions) if (p > maxLast) maxLast = p;
-                int total = inspirationAdapter.getItemCount();
+                int total = promptAdapter.getItemCount();
                 if (total > 0 && maxLast >= total - 6) {
-                    if (inspireSubTab == 0 && plazaHasMore && !plazaLoading) {
-                        fetchPlaza(false);
-                    } else if (inspireSubTab == 1 && galleryData != null) {
-                        List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, galleryMajor, galleryQuery);
-                        if (galleryVisibleCount < filtered.size()) {
-                            galleryVisibleCount += GALLERY_PAGE_SIZE;
-                            bindGalleryToAdapter(filtered);
+                    if (promptSourceIndex == 4) {
+                        // 收藏列表无需分页
+                    } else if (galleryData != null) {
+                        String st = promptSourceTag(promptSourceIndex);
+                        List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, st, promptMajor, promptQuery);
+                        if (promptVisibleCount < filtered.size()) {
+                            promptVisibleCount += GALLERY_PAGE_SIZE;
+                            bindPromptToAdapter(filtered);
                         }
                     }
                 }
             }
         });
 
-        inspireSwipe.addView(inspireRecycler, new FrameLayout.LayoutParams(-1, -1));
-        body.addView(inspireSwipe, new FrameLayout.LayoutParams(-1, -1));
+        promptSwipe.addView(promptRecycler, new FrameLayout.LayoutParams(-1, -1));
+        body.addView(promptSwipe, new FrameLayout.LayoutParams(-1, -1));
 
-        inspireStateBox = new FrameLayout(this);
-        inspireStateBox.setPadding(dp(18), dp(20), dp(18), dp(112));
-        inspireStateBox.setVisibility(View.GONE);
-        body.addView(inspireStateBox, new FrameLayout.LayoutParams(-1, -1));
+        promptStateBox = new FrameLayout(this);
+        promptStateBox.setPadding(dp(18), dp(20), dp(18), dp(112));
+        promptStateBox.setVisibility(View.GONE);
+        body.addView(promptStateBox, new FrameLayout.LayoutParams(-1, -1));
 
         wrap.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
-        rebuildInspireSwitcher();
+        rebuildPromptSourceSwitcher();
         return wrap;
     }
 
-    private void rebuildInspireSwitcher() {
-        inspireSegHolder.removeAllViews();
-        inspireSegHolder.addView(UiKit.segmentedControl(this, new String[]{"创意广场", "提示词画廊", "收藏"}, inspireSubTab, idx -> {
-            if (inspireSubTab != idx) {
+    private void rebuildPromptSourceSwitcher() {
+        promptSourceSegHolder.removeAllViews();
+        promptSourceSegHolder.addView(UiKit.segmentedControl(this,
+                new String[]{"全部", "热榜图鉴", "设计精选", "经典画廊", "收藏"}, promptSourceIndex, 12f, idx -> {
+            if (promptSourceIndex != idx) {
                 hideKeyboard();
-                inspireSubTab = idx;
-                rebuildInspireSwitcher();
-                refreshInspireTab(true);
+                promptSourceIndex = idx;
+                promptMajor = "全部";
+                promptVisibleCount = GALLERY_PAGE_SIZE;
+                builtPromptMajorsSignature = "";
+                rebuildPromptSourceSwitcher();
+                refreshPromptTab(true);
             }
         }));
     }
 
-    private void applyGallerySearch() {
+    private void applyPromptSearch() {
         hideKeyboard();
-        galleryQuery = gallerySearchInput.getText().toString().trim();
-        galleryVisibleCount = GALLERY_PAGE_SIZE;
-        refreshInspireTab(true);
+        promptQuery = promptSearchInput.getText().toString().trim();
+        promptVisibleCount = GALLERY_PAGE_SIZE;
+        refreshPromptTab(true);
     }
 
-    private void refreshInspireTab(boolean scrollToTop) {
-        galleryToolsBox.setVisibility(inspireSubTab == 1 ? View.VISIBLE : View.GONE);
-        inspireStateBox.removeAllViews();
-        inspireStateBox.setVisibility(View.GONE);
+    private void refreshPromptTab(boolean scrollToTop) {
+        if (promptStateBox == null) return;
+        promptStateBox.removeAllViews();
+        promptStateBox.setVisibility(View.GONE);
 
-        if (inspireSubTab == 0) {
-            if (plazaItems.isEmpty() && !plazaLoading && plazaError.isEmpty()) {
-                fetchPlaza(true);
-                return;
+        if (promptSourceIndex == 4) {
+            if (promptMajorsRow != null) promptMajorsRow.removeAllViews();
+            builtPromptMajorsSignature = "";
+            List<InspirationRepository.Item> favs = InspirationRepository.getFavorites(this);
+            if (!promptQuery.isEmpty()) {
+                String q = promptQuery.toLowerCase(Locale.ROOT);
+                List<InspirationRepository.Item> matchFavs = new ArrayList<>();
+                for (InspirationRepository.Item item : favs) {
+                    if (item.title.toLowerCase(Locale.ROOT).contains(q)
+                            || item.prompt.toLowerCase(Locale.ROOT).contains(q)
+                            || item.category.toLowerCase(Locale.ROOT).contains(q)) {
+                        matchFavs.add(item);
+                    }
+                }
+                favs = matchFavs;
             }
-            if (plazaLoading && plazaItems.isEmpty()) {
-                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-                showStateIn(inspireStateBox, loadingHintCard("正在加载创意广场…"));
-                return;
-            }
-            if (!plazaError.isEmpty() && plazaItems.isEmpty()) {
-                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-                showStateIn(inspireStateBox, emptyCard("加载失败", plazaError, "重新加载", () -> fetchPlaza(true)));
-                return;
-            }
-            String footer = plazaLoading ? "正在加载更多灵感…" : (plazaHasMore ? "上滑自动加载更多" : "已经到底啦");
-            inspirationAdapter.setData(plazaItems, favoriteKeySet(), safeBrowse, footer);
-            if (scrollToTop) inspireRecycler.scrollToPosition(0);
-            return;
-        }
-
-        if (inspireSubTab == 1) {
-            if (galleryData == null && !galleryLoading && galleryError.isEmpty()) {
-                fetchGallery(false);
-                return;
-            }
-            if (galleryLoading && galleryData == null) {
-                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-                showStateIn(inspireStateBox, loadingHintCard("首次拉取 5,400+ 提示词画廊并缓存离线可用…"));
-                return;
-            }
-            if (!galleryError.isEmpty() && galleryData == null) {
-                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-                showStateIn(inspireStateBox, emptyCard("加载失败", galleryError, "重新加载", () -> fetchGallery(true)));
-                return;
-            }
-            rebuildGalleryMajorChips();
-            List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, galleryMajor, galleryQuery);
-            galleryCountLabel.setText("共 " + filtered.size() + " 条灵感 · 已缓存离线秒开");
-            if (filtered.isEmpty()) {
-                inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-                showStateIn(inspireStateBox, emptyCard("没有找到匹配的提示词", "试试切换分类或换个关键词搜索。", "重置筛选", () -> {
-                    galleryMajor = "全部";
-                    galleryQuery = "";
-                    gallerySearchInput.setText("");
-                    galleryVisibleCount = GALLERY_PAGE_SIZE;
-                    refreshInspireTab(true);
+            promptCountLabel.setText("共收藏 " + favs.size() + " 条灵感");
+            if (favs.isEmpty()) {
+                promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+                showStateIn(promptStateBox, emptyCard("暂无收藏灵感", "在热榜图鉴、设计精选或经典画廊轻触红心即可加入收藏。", "浏览热榜图鉴", () -> {
+                    promptSourceIndex = 1;
+                    promptMajor = "全部";
+                    promptQuery = "";
+                    if (promptSearchInput != null) promptSearchInput.setText("");
+                    promptVisibleCount = GALLERY_PAGE_SIZE;
+                    builtPromptMajorsSignature = "";
+                    rebuildPromptSourceSwitcher();
+                    refreshPromptTab(true);
                 }));
                 return;
             }
-            bindGalleryToAdapter(filtered);
-            if (scrollToTop) inspireRecycler.scrollToPosition(0);
+            promptAdapter.setData(favs, favoriteKeySet(), safeBrowse, "共收藏 " + favs.size() + " 条提示词灵感");
+            if (scrollToTop && promptRecycler != null) promptRecycler.scrollToPosition(0);
             return;
         }
 
-        // 收藏子页
-        List<InspirationRepository.Item> favs = InspirationRepository.getFavorites(this);
-        if (favs.isEmpty()) {
-            inspirationAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-            showStateIn(inspireStateBox, emptyCard("还没有收藏灵感", "在创意广场或提示词画廊点击右上角心形，即可随时收藏备用。", "去逛创意广场", () -> {
-                inspireSubTab = 0;
-                rebuildInspireSwitcher();
-                refreshInspireTab(true);
+        if (galleryData == null && !galleryLoading && galleryError.isEmpty()) {
+            fetchGallery(false);
+            return;
+        }
+        if (galleryLoading && galleryData == null) {
+            promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+            showStateIn(promptStateBox, loadingHintCard("正在加载 13,780+ 提示词库并优化离线秒开…"));
+            return;
+        }
+        if (!galleryError.isEmpty() && galleryData == null) {
+            promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+            showStateIn(promptStateBox, emptyCard("加载失败", galleryError, "重新加载", () -> fetchGallery(true)));
+            return;
+        }
+
+        rebuildPromptMajorChips();
+        String sourceTag = promptSourceTag(promptSourceIndex);
+        List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, sourceTag, promptMajor, promptQuery);
+        String sourceName = promptSourceIndex == 1 ? "热榜图鉴" : (promptSourceIndex == 2 ? "设计精选" : (promptSourceIndex == 3 ? "经典画廊" : "全库"));
+        promptCountLabel.setText("共 " + filtered.size() + " 条" + sourceName + "提示词 · 离线秒开");
+        if (filtered.isEmpty()) {
+            promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+            showStateIn(promptStateBox, emptyCard("没有找到匹配的提示词", "试试切换分类或换个关键词搜索。", "重置筛选", () -> {
+                promptMajor = "全部";
+                promptQuery = "";
+                if (promptSearchInput != null) promptSearchInput.setText("");
+                promptVisibleCount = GALLERY_PAGE_SIZE;
+                builtPromptMajorsSignature = "";
+                refreshPromptTab(true);
             }));
             return;
         }
-        inspirationAdapter.setData(favs, favoriteKeySet(), safeBrowse, "共收藏 " + favs.size() + " 条灵感");
-        if (scrollToTop) inspireRecycler.scrollToPosition(0);
+        bindPromptToAdapter(filtered);
+        if (scrollToTop && promptRecycler != null) promptRecycler.scrollToPosition(0);
     }
 
-    private void bindGalleryToAdapter(List<InspirationRepository.Item> filtered) {
-        int showCount = Math.min(galleryVisibleCount, filtered.size());
+    private void bindPromptToAdapter(List<InspirationRepository.Item> filtered) {
+        int showCount = Math.min(promptVisibleCount, filtered.size());
         String footer = showCount < filtered.size()
                 ? "下滑自动加载更多（剩余 " + (filtered.size() - showCount) + " 条）"
-                : "已展示全部 " + filtered.size() + " 条灵感";
-        inspirationAdapter.setData(filtered.subList(0, showCount), favoriteKeySet(), safeBrowse, footer);
+                : "已展示全部 " + filtered.size() + " 条提示词";
+        promptAdapter.setData(filtered.subList(0, showCount), favoriteKeySet(), safeBrowse, footer);
     }
 
-    private void rebuildGalleryMajorChips() {
-        if (galleryData == null) return;
-        String sig = galleryMajor + "|" + galleryData.majors.size();
-        if (sig.equals(builtMajorsSignature)) return;
-        builtMajorsSignature = sig;
-        galleryMajorsRow.removeAllViews();
-        for (int i = 0; i < galleryData.majors.size(); i++) {
-            String major = galleryData.majors.get(i);
-            TextView chip = UiKit.chip(this, major, major.equals(galleryMajor), () -> {
-                if (!major.equals(galleryMajor)) {
-                    galleryMajor = major;
-                    galleryVisibleCount = GALLERY_PAGE_SIZE;
-                    builtMajorsSignature = "";
-                    refreshInspireTab(true);
+    private void rebuildPromptMajorChips() {
+        if (galleryData == null || promptMajorsRow == null) return;
+        String sourceTag = promptSourceTag(promptSourceIndex);
+        List<String> majors = galleryData.getMajors(sourceTag);
+        String sig = sourceTag + "|" + promptMajor + "|" + majors.size();
+        if (sig.equals(builtPromptMajorsSignature)) return;
+        builtPromptMajorsSignature = sig;
+        promptMajorsRow.removeAllViews();
+        for (int i = 0; i < majors.size(); i++) {
+            String major = majors.get(i);
+            TextView chip = UiKit.chip(this, major, major.equals(promptMajor), () -> {
+                if (!major.equals(promptMajor)) {
+                    promptMajor = major;
+                    promptVisibleCount = GALLERY_PAGE_SIZE;
+                    builtPromptMajorsSignature = "";
+                    refreshPromptTab(true);
                 }
             });
             LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
             if (i > 0) clp.leftMargin = dp(7);
-            galleryMajorsRow.addView(chip, clp);
+            promptMajorsRow.addView(chip, clp);
         }
+    }
+
+    // ==================== Tab 2: 创意广场（实时全网灵感流 + 自动分页 + 瀑布流） ====================
+
+    private View buildPlazaTab() {
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout headerPad = new LinearLayout(this);
+        headerPad.setOrientation(LinearLayout.VERTICAL);
+        headerPad.setPadding(dp(18), dp(14), dp(18), dp(8));
+
+        headerPad.addView(UiKit.pageTitleHeader(this, "创意广场", "全网社区热门作品实时灵感流", null));
+        wrap.addView(headerPad, new LinearLayout.LayoutParams(-1, -2));
+
+        FrameLayout body = new FrameLayout(this);
+        plazaSwipe = new SwipeRefreshLayout(this);
+        plazaSwipe.setColorSchemeColors(UiKit.BLUE);
+        plazaSwipe.setOnRefreshListener(() -> fetchPlaza(true));
+
+        plazaRecycler = new RecyclerView(this);
+        StaggeredGridLayoutManager sglm = new StaggeredGridLayoutManager(2, StaggeredGridLayoutManager.VERTICAL);
+        sglm.setGapStrategy(StaggeredGridLayoutManager.GAP_HANDLING_MOVE_ITEMS_BETWEEN_SPANS);
+        plazaRecycler.setLayoutManager(sglm);
+        plazaRecycler.setPadding(dp(13), dp(6), dp(13), dp(112));
+        plazaRecycler.setClipToPadding(false);
+        plazaRecycler.setItemAnimator(null);
+
+        plazaAdapter = new GalleryAdapters.InspirationAdapter(this, new GalleryAdapters.InspirationListener() {
+            @Override public void onItemClick(InspirationRepository.Item item) {
+                openInspireDetailOverlay(item);
+            }
+            @Override public void onQuickSameClick(InspirationRepository.Item item) {
+                applyInspirationToHome(item);
+            }
+            @Override public void onFavoriteToggle(InspirationRepository.Item item) {
+                boolean added = InspirationRepository.toggleFavorite(MainActivity.this, item);
+                Toast.makeText(MainActivity.this, added ? "已加入灵感收藏" : "已取消收藏", Toast.LENGTH_SHORT).show();
+                plazaAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+                if (promptAdapter != null) promptAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+            }
+        });
+        plazaRecycler.setAdapter(plazaAdapter);
+
+        // 触底自动分页加载
+        plazaRecycler.addOnScrollListener(new RecyclerView.OnScrollListener() {
+            @Override public void onScrolled(RecyclerView rv, int dx, int dy) {
+                if (dy <= 0) return;
+                StaggeredGridLayoutManager lm = (StaggeredGridLayoutManager) rv.getLayoutManager();
+                if (lm == null) return;
+                int[] lastPositions = lm.findLastVisibleItemPositions(null);
+                int maxLast = 0;
+                for (int p : lastPositions) if (p > maxLast) maxLast = p;
+                int total = plazaAdapter.getItemCount();
+                if (total > 0 && maxLast >= total - 6) {
+                    if (plazaHasMore && !plazaLoading) {
+                        fetchPlaza(false);
+                    }
+                }
+            }
+        });
+
+        plazaSwipe.addView(plazaRecycler, new FrameLayout.LayoutParams(-1, -1));
+        body.addView(plazaSwipe, new FrameLayout.LayoutParams(-1, -1));
+
+        plazaStateBox = new FrameLayout(this);
+        plazaStateBox.setPadding(dp(18), dp(20), dp(18), dp(112));
+        plazaStateBox.setVisibility(View.GONE);
+        body.addView(plazaStateBox, new FrameLayout.LayoutParams(-1, -1));
+
+        wrap.addView(body, new LinearLayout.LayoutParams(-1, 0, 1));
+        return wrap;
+    }
+
+    private void refreshPlazaTab(boolean scrollToTop) {
+        if (plazaStateBox == null) return;
+        plazaStateBox.removeAllViews();
+        plazaStateBox.setVisibility(View.GONE);
+
+        if (plazaItems.isEmpty() && !plazaLoading && plazaError.isEmpty()) {
+            fetchPlaza(true);
+            return;
+        }
+        if (plazaLoading && plazaItems.isEmpty()) {
+            plazaAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+            showStateIn(plazaStateBox, loadingHintCard("正在加载创意广场…"));
+            return;
+        }
+        if (!plazaError.isEmpty() && plazaItems.isEmpty()) {
+            plazaAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
+            showStateIn(plazaStateBox, emptyCard("加载失败", plazaError, "重新加载", () -> fetchPlaza(true)));
+            return;
+        }
+        String footer = plazaLoading ? "正在加载更多灵感…" : (plazaHasMore ? "上滑自动加载更多" : "已经到底啦");
+        plazaAdapter.setData(plazaItems, favoriteKeySet(), safeBrowse, footer);
+        if (scrollToTop && plazaRecycler != null) plazaRecycler.scrollToPosition(0);
     }
 
     private Set<String> favoriteKeySet() {
@@ -1698,9 +1812,9 @@ public final class MainActivity extends Activity {
             plazaPage = 0;
             plazaHasMore = true;
         }
-        if (activeTab == 1 && inspireSubTab == 0) {
-            if (plazaItems.isEmpty()) refreshInspireTab(false);
-            else inspirationAdapter.setFooterText("正在加载更多灵感…");
+        if (activeTab == 2) {
+            if (plazaItems.isEmpty()) refreshPlazaTab(false);
+            else if (plazaAdapter != null) plazaAdapter.setFooterText("正在加载更多灵感…");
         }
         new Thread(() -> {
             try {
@@ -1712,8 +1826,8 @@ public final class MainActivity extends Activity {
                     plazaItems.addAll(result.items);
                     MainActivity act = visible;
                     if (act != null) {
-                        act.inspireSwipe.setRefreshing(false);
-                        if (act.activeTab == 1 && act.inspireSubTab == 0) act.refreshInspireTab(false);
+                        if (act.plazaSwipe != null) act.plazaSwipe.setRefreshing(false);
+                        if (act.activeTab == 2) act.refreshPlazaTab(false);
                     }
                 });
             } catch (Exception e) {
@@ -1723,8 +1837,8 @@ public final class MainActivity extends Activity {
                     plazaError = msg;
                     MainActivity act = visible;
                     if (act != null) {
-                        act.inspireSwipe.setRefreshing(false);
-                        if (act.activeTab == 1 && act.inspireSubTab == 0) act.refreshInspireTab(false);
+                        if (act.plazaSwipe != null) act.plazaSwipe.setRefreshing(false);
+                        if (act.activeTab == 2) act.refreshPlazaTab(false);
                     }
                 });
             }
@@ -1737,9 +1851,9 @@ public final class MainActivity extends Activity {
         galleryError = "";
         if (forceRefresh) {
             galleryData = null;
-            builtMajorsSignature = "";
+            builtPromptMajorsSignature = "";
         }
-        if (activeTab == 1 && inspireSubTab == 1) refreshInspireTab(false);
+        if (activeTab == 1) refreshPromptTab(false);
         Context appContext = getApplicationContext();
         new Thread(() -> {
             try {
@@ -1749,19 +1863,19 @@ public final class MainActivity extends Activity {
                     galleryData = data;
                     MainActivity act = visible;
                     if (act != null) {
-                        act.inspireSwipe.setRefreshing(false);
-                        if (act.activeTab == 1 && act.inspireSubTab == 1) act.refreshInspireTab(false);
+                        if (act.promptSwipe != null) act.promptSwipe.setRefreshing(false);
+                        if (act.activeTab == 1) act.refreshPromptTab(false);
                     }
                 });
             } catch (Exception e) {
-                String msg = e.getMessage() == null ? "提示词画廊加载失败，请检查网络。" : e.getMessage();
+                String msg = e.getMessage() == null ? "提示词库加载失败，请检查网络。" : e.getMessage();
                 uiHandler.post(() -> {
                     galleryLoading = false;
                     galleryError = msg;
                     MainActivity act = visible;
                     if (act != null) {
-                        act.inspireSwipe.setRefreshing(false);
-                        if (act.activeTab == 1 && act.inspireSubTab == 1) act.refreshInspireTab(false);
+                        if (act.promptSwipe != null) act.promptSwipe.setRefreshing(false);
+                        if (act.activeTab == 1) act.refreshPromptTab(false);
                     }
                 });
             }
@@ -2412,7 +2526,10 @@ public final class MainActivity extends Activity {
             favIcon.setImageResource(nowFav ? R.drawable.ic_heart_filled : R.drawable.ic_heart);
             favIcon.setColorFilter(nowFav ? 0xFFE5484D : UiKit.INK, PorterDuff.Mode.SRC_IN);
             Toast.makeText(this, nowFav ? "已加入灵感收藏" : "已取消收藏", Toast.LENGTH_SHORT).show();
-            if (activeTab == 1) refreshInspireTab(false);
+            if (activeTab == 1) refreshPromptTab(false);
+            else if (activeTab == 2) refreshPlazaTab(false);
+            if (promptAdapter != null) promptAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
+            if (plazaAdapter != null) plazaAdapter.updateFavoritesAndSafeBrowse(favoriteKeySet(), safeBrowse);
         });
         rightCircles.addView(favCircle, new LinearLayout.LayoutParams(dp(44), dp(44)));
 
@@ -3163,7 +3280,7 @@ public final class MainActivity extends Activity {
     @Override public void onBackPressed() {
         if (!overlayStack.isEmpty()) {
             popOverlay();
-        } else if (activeTab == 2 && librarySelectMode) {
+        } else if (activeTab == 3 && librarySelectMode) {
             exitLibrarySelectMode();
         } else if (activeTab != 0) {
             switchTab(0);

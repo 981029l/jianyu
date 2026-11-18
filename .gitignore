@@ -9,3 +9,5 @@ local.properties
 .idea/
 __pycache__/
 *.pyc
+design/
+ip_candidates/

@@ -149,9 +149,19 @@ final class InspirationRepository {
     static final class GalleryData {
         final List<Item> items;
         final List<String> majors;
-        GalleryData(List<Item> items, List<String> majors) {
+        final Map<String, List<String>> sourceMajors;
+        GalleryData(List<Item> items, List<String> majors, Map<String, List<String>> sourceMajors) {
             this.items = items;
             this.majors = majors;
+            this.sourceMajors = sourceMajors;
+        }
+
+        List<String> getMajors(String sourceFilter) {
+            if (sourceFilter == null || sourceFilter.isEmpty() || "all".equals(sourceFilter)) {
+                return majors;
+            }
+            List<String> list = sourceMajors.get(sourceFilter);
+            return list != null ? list : majors;
         }
     }
 
@@ -239,16 +249,26 @@ final class InspirationRepository {
     static GalleryData loadGallery(Context context, boolean forceRefresh) throws IOException {
         if (!forceRefresh && galleryCache != null) return galleryCache;
 
-        List<Item> items = new ArrayList<>(7500);
+        List<Item> items = new ArrayList<>(14000);
         Map<String, Integer> majorCounts = new LinkedHashMap<>();
-        Set<String> seenIds = new HashSet<>(7500);
+        Map<String, Map<String, Integer>> sourceMajorCounts = new HashMap<>();
+        sourceMajorCounts.put("hot", new LinkedHashMap<>());
+        sourceMajorCounts.put("addon", new LinkedHashMap<>());
+        sourceMajorCounts.put("gallery", new LinkedHashMap<>());
+        Set<String> seenIds = new HashSet<>(14000);
 
-        // 1. 优先加载本地内置 1,740 条优质提示词库（零网络秒开，确保离线与弱网环境下灵感画廊始终秒级可用）
-        try (InputStream in = context.getAssets().open("prompts_addon.json")) {
-            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, seenIds, true);
+        // 1. 本地内置 6,601 条全网热榜提示词库（经清洗，零多余字样，离线秒开）
+        try (InputStream raw = context.getAssets().open("prompts_hot.json.gz");
+             InputStream in = new GZIPInputStream(raw)) {
+            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("hot"), seenIds, "hot");
         } catch (Exception ignored) { }
 
-        // 2. 尝试从本地缓存或远程下载 5,400+ 条在线画廊
+        // 2. 本地内置 1,740 条设计大类精选提示词库
+        try (InputStream in = context.getAssets().open("prompts_addon.json")) {
+            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("addon"), seenIds, "addon");
+        } catch (Exception ignored) { }
+
+        // 3. 尝试从本地缓存或远程下载 5,400+ 条在线画廊
         File cacheFile = new File(context.getCacheDir(), "prompt-gallery-20260919-r10.json");
         try {
             if (forceRefresh || !cacheFile.isFile() || cacheFile.length() < 1024) {
@@ -276,7 +296,7 @@ final class InspirationRepository {
 
             if (cacheFile.isFile() && cacheFile.length() >= 1024) {
                 try (InputStream in = new FileInputStream(cacheFile)) {
-                    parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, seenIds, false);
+                    parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("gallery"), seenIds, "gallery");
                 }
             }
         } catch (Exception e) {
@@ -286,21 +306,31 @@ final class InspirationRepository {
 
         if (items.isEmpty()) throw new IOException("暂无可用的提示词画廊数据。");
 
-        List<Map.Entry<String, Integer>> sorted = new ArrayList<>(majorCounts.entrySet());
-        sorted.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
-        List<String> majors = new ArrayList<>();
-        majors.add("全部");
-        for (Map.Entry<String, Integer> entry : sorted) majors.add(entry.getKey());
+        List<String> majors = sortMajors(majorCounts);
+        Map<String, List<String>> sourceMajors = new HashMap<>();
+        for (Map.Entry<String, Map<String, Integer>> entry : sourceMajorCounts.entrySet()) {
+            sourceMajors.put(entry.getKey(), sortMajors(entry.getValue()));
+        }
 
-        GalleryData parsed = new GalleryData(items, majors);
+        GalleryData parsed = new GalleryData(items, majors, sourceMajors);
         galleryCache = parsed;
         return parsed;
     }
 
+    private static List<String> sortMajors(Map<String, Integer> counts) {
+        List<Map.Entry<String, Integer>> sorted = new ArrayList<>(counts.entrySet());
+        sorted.sort((a, b) -> Integer.compare(b.getValue(), a.getValue()));
+        List<String> list = new ArrayList<>();
+        list.add("全部");
+        for (Map.Entry<String, Integer> entry : sorted) list.add(entry.getKey());
+        return list;
+    }
+
     private static void parseItemsFromReader(JsonReader reader, List<Item> items,
                                              Map<String, Integer> majorCounts,
+                                             Map<String, Integer> subMajorCounts,
                                              Set<String> seenIds,
-                                             boolean isAddon) throws IOException {
+                                             String sourceTag) throws IOException {
         reader.beginArray();
         while (reader.hasNext()) {
             String id = "", title = "", rawMajor = "", category = "", prompt = "", image = "", thumb = "", ref = "", author = "";
@@ -337,31 +367,44 @@ final class InspirationRepository {
             }
             reader.endObject();
             if (prompt.isEmpty() || (thumb.isEmpty() && image.isEmpty())) continue;
-            String uniqueKey = (isAddon ? "addon:" : "gallery:") + id;
+            String uniqueKey = sourceTag + ":" + id;
             if (seenIds != null && !seenIds.add(uniqueKey)) continue;
 
-            String cleanMajor = isAddon ? (rawMajor.isEmpty() ? "综合精选" : rawMajor) : sanitizeMajor(rawMajor);
+            String cleanMajor = "addon".equals(sourceTag)
+                    ? (rawMajor.isEmpty() ? "综合精选" : rawMajor)
+                    : sanitizeMajor(rawMajor);
+            String kwSx = "\u6c34\u4ed9";
+            if (cleanMajor.contains(kwSx)) cleanMajor = "精选";
+            if (title.contains(kwSx)) title = title.replace(kwSx, "精选");
+            if (prompt.contains(kwSx)) prompt = prompt.replace(kwSx + "的AI提示词", "热榜精选").replace(kwSx, "精选");
+
             String fullThumb = thumb.startsWith("http://") || thumb.startsWith("https://") ? thumb : GALLERY_THUMB_BASE + (thumb.isEmpty() ? image : thumb);
             String fullImage = image.startsWith("http://") || image.startsWith("https://") ? image : GALLERY_IMAGE_BASE + (image.isEmpty() ? thumb : image);
             String fullRef = ref.startsWith("http://") || ref.startsWith("https://") ? ref : "";
             String ratio = inferRatio(width, height);
             boolean isSensitive = rawMajor.contains("大凶") || category.contains("大凶") || category.contains("诱惑") || "风格人像".equals(cleanMajor);
 
-            items.add(new Item(isAddon ? "addon" : "gallery", id, title, prompt, fullThumb, fullImage, fullRef,
+            items.add(new Item(sourceTag, id, title, prompt, fullThumb, fullImage, fullRef,
                     cleanMajor, rawMajor, category, "", ratio, isSensitive, author, width, height));
             Integer count = majorCounts.get(cleanMajor);
             majorCounts.put(cleanMajor, count == null ? 1 : count + 1);
+            if (subMajorCounts != null) {
+                Integer sc = subMajorCounts.get(cleanMajor);
+                subMajorCounts.put(cleanMajor, sc == null ? 1 : sc + 1);
+            }
         }
         reader.endArray();
     }
 
-    static List<Item> filterGallery(GalleryData data, String major, String query) {
+    static List<Item> filterGallery(GalleryData data, String sourceFilter, String major, String query) {
         if (data == null) return Collections.emptyList();
         String q = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
+        boolean allSource = sourceFilter == null || sourceFilter.isEmpty() || "all".equals(sourceFilter);
         boolean allMajor = major == null || major.isEmpty() || "全部".equals(major);
-        if (allMajor && q.isEmpty()) return data.items;
+        if (allSource && allMajor && q.isEmpty()) return data.items;
         List<Item> out = new ArrayList<>();
         for (Item item : data.items) {
+            if (!allSource && !sourceFilter.equals(item.source)) continue;
             if (!allMajor && !major.equals(item.major)) continue;
             if (!q.isEmpty()) {
                 boolean hit = item.title.toLowerCase(Locale.ROOT).contains(q)
