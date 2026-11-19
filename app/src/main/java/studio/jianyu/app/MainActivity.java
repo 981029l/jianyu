@@ -1406,7 +1406,7 @@ public final class MainActivity extends Activity {
         headerPad.setOrientation(LinearLayout.VERTICAL);
         headerPad.setPadding(dp(18), dp(14), dp(18), dp(8));
 
-        headerPad.addView(UiKit.pageTitleHeader(this, "提示词工坊", "13,780+ 精选提示词 · 离线秒开", null));
+        headerPad.addView(UiKit.pageTitleHeader(this, "提示词工坊", "热榜 6,601 · 精选 1,740 · 画廊 5,443", null));
 
         // 来源分段切换条：[ 全部 | 热榜图鉴 | 设计精选 | 经典画廊 | 收藏 ]
         promptSourceSegHolder = new LinearLayout(this);
@@ -1431,7 +1431,7 @@ public final class MainActivity extends Activity {
         promptSearchInput.setTextSize(13.5f);
         promptSearchInput.setTextColor(UiKit.INK);
         promptSearchInput.setHintTextColor(0xFF94A3B8);
-        promptSearchInput.setHint("搜索 13,780+ 条提示词、风格、分类…");
+        promptSearchInput.setHint("搜索热榜、精选、画廊提示词与风格…");
         promptSearchInput.setText(promptQuery);
         promptSearchInput.setOnEditorActionListener((v, actionId, event) -> {
             applyPromptSearch();
@@ -1644,7 +1644,10 @@ public final class MainActivity extends Activity {
         promptCountLabel.setText("共 " + filtered.size() + " 条" + sourceName + "提示词 · 离线秒开");
         if (filtered.isEmpty()) {
             promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-            showStateIn(promptStateBox, emptyCard("没有找到匹配的提示词", "试试切换分类或换个关键词搜索。", "重置筛选", () -> {
+            String emptyMsg = (promptSourceIndex == 1 && galleryData != null && !galleryData.hotError.isEmpty())
+                    ? "热榜资产读取异常：" + galleryData.hotError
+                    : "试试切换分类或换个关键词搜索。";
+            showStateIn(promptStateBox, emptyCard("没有找到匹配的提示词", emptyMsg, "重置筛选", () -> {
                 promptMajor = "全部";
                 promptQuery = "";
                 if (promptSearchInput != null) promptSearchInput.setText("");

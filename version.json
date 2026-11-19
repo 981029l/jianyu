@@ -1,6 +1,6 @@
 {
-  "versionCode": 12,
-  "versionName": "0.8.3",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.3/Jianyu-v0.8.3.apk",
-  "releaseNotes": "1. 配置 noCompress 资源免压缩策略：彻底击穿 Android AssetManager 底层 1MB (UNCOMPRESS_DATA_MAX) 限制，6,601 条热榜图鉴与 1,740 条设计精选实现真·零压缩直读秒开，总库 13,784 条提示词完整加载。\n2. 纯净画面比例角标：彻底移除角标前缀文字，仅呈现纯粹画布比例标签（9:16、3:4、1:1 等）。\n3. 作品库分段器重构：全宽流体药丸分段控件，居中对称、舒展美观。"
+  "versionCode": 13,
+  "versionName": "0.8.4",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.4/Jianyu-v0.8.4.apk",
+  "releaseNotes": "1. 热榜图鉴重排按真实热度（点赞数降序）展示：此前热榜数据与旧画廊存在 5,421 条同源重叠且原顺序把旧图排在最前 5,000 条，导致前几百屏与旧画廊一模一样；现已按热度点赞数从高到低重排（6,030 赞、5,603 赞、2,485 赞等全新热榜爆款直达首屏）。\n2. 全部视图自动去重：热榜与旧画廊重合条目自动去重，呈现 8,363 条不重复精品提示词；单独切至「热榜图鉴(6,601) / 设计精选(1,740) / 经典画廊(5,443)」仍可独立浏览全量数据。"
 }

@@ -148,12 +148,17 @@ final class InspirationRepository {
 
     static final class GalleryData {
         final List<Item> items;
+        final List<Item> uniqueAllItems;
         final List<String> majors;
         final Map<String, List<String>> sourceMajors;
-        GalleryData(List<Item> items, List<String> majors, Map<String, List<String>> sourceMajors) {
+        final String hotError;
+        GalleryData(List<Item> items, List<Item> uniqueAllItems, List<String> majors,
+                    Map<String, List<String>> sourceMajors, String hotError) {
             this.items = items;
+            this.uniqueAllItems = uniqueAllItems;
             this.majors = majors;
             this.sourceMajors = sourceMajors;
+            this.hotError = hotError == null ? "" : hotError;
         }
 
         List<String> getMajors(String sourceFilter) {
@@ -257,13 +262,16 @@ final class InspirationRepository {
         sourceMajorCounts.put("gallery", new LinkedHashMap<>());
         Set<String> seenIds = new HashSet<>(14000);
 
-        // 1. 本地内置 6,601 条全网热榜提示词库（经清洗，零多余字样，离线秒开）
+        // 1. 本地内置 6,601 条全网热榜提示词库（已按热度点赞降序排列，经清洗，离线秒开）
+        String hotError = "";
         try (InputStream in = context.getAssets().open("prompts_hot.json")) {
             parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("hot"), seenIds, "hot");
         } catch (Exception e1) {
+            hotError = e1.getClass().getSimpleName() + ": " + e1.getMessage();
             try (InputStream raw = context.getAssets().open("prompts_hot.json.gz");
                  InputStream in = new GZIPInputStream(raw)) {
                 parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("hot"), seenIds, "hot");
+                hotError = "";
             } catch (Exception ignored) { }
         }
 
@@ -310,13 +318,27 @@ final class InspirationRepository {
 
         if (items.isEmpty()) throw new IOException("暂无可用的提示词画廊数据。");
 
+        // 构建「全部」视图去重列表：热榜(6,601)与经典画廊(5,443)同源重合 5,421 条，全部视图自动按 id 去重避免刷出双份
+        List<Item> uniqueAll = new ArrayList<>(items.size());
+        Set<String> hotIds = new HashSet<>(7000);
+        for (Item item : items) {
+            if ("hot".equals(item.source)) {
+                hotIds.add(item.id);
+                uniqueAll.add(item);
+            } else if ("gallery".equals(item.source)) {
+                if (!hotIds.contains(item.id)) uniqueAll.add(item);
+            } else {
+                uniqueAll.add(item);
+            }
+        }
+
         List<String> majors = sortMajors(majorCounts);
         Map<String, List<String>> sourceMajors = new HashMap<>();
         for (Map.Entry<String, Map<String, Integer>> entry : sourceMajorCounts.entrySet()) {
             sourceMajors.put(entry.getKey(), sortMajors(entry.getValue()));
         }
 
-        GalleryData parsed = new GalleryData(items, majors, sourceMajors);
+        GalleryData parsed = new GalleryData(items, uniqueAll, majors, sourceMajors, hotError);
         galleryCache = parsed;
         return parsed;
     }
@@ -405,9 +427,10 @@ final class InspirationRepository {
         String q = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
         boolean allSource = sourceFilter == null || sourceFilter.isEmpty() || "all".equals(sourceFilter);
         boolean allMajor = major == null || major.isEmpty() || "全部".equals(major);
-        if (allSource && allMajor && q.isEmpty()) return data.items;
+        List<Item> pool = allSource ? data.uniqueAllItems : data.items;
+        if (allSource && allMajor && q.isEmpty()) return pool;
         List<Item> out = new ArrayList<>();
-        for (Item item : data.items) {
+        for (Item item : pool) {
             if (!allSource && !sourceFilter.equals(item.source)) continue;
             if (!allMajor && !major.equals(item.major)) continue;
             if (!q.isEmpty()) {
