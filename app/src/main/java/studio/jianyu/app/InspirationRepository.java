@@ -30,8 +30,11 @@ final class InspirationRepository {
     private static final String AIART_API_BASE = "https://aiart.pics/api/prompts";
     private static final String AIART_IMG_BASE = "https://img1.aiart.pics/";
     private static final String OPENNANA_API_BASE = "https://api.opennana.com/api/prompts";
+    private static final String LEADERAI_INDEX_URL = "https://cdn.leaderai.top/oss/moban-image/image_prompt/imgs_index.json";
+    private static final String LEADERAI_IMG_BASE = "https://cdn.leaderai.top/oss/moban-image/image_prompt/imgs_src/";
     private static final int JSON_LIMIT = 4 * 1024 * 1024;
     private static final int CATALOG_LIMIT = 20 * 1024 * 1024;
+    private static final int LEADERAI_LIMIT = 25 * 1024 * 1024;
     private static final int IMAGE_LIMIT = 12 * 1024 * 1024;
     private static final String FAV_PREFS = "inspire-favs";
     private static final String FAV_KEY = "items";
@@ -214,6 +217,58 @@ final class InspirationRepository {
         if (trimmed.contains("大凶")) return "风格人像";
         if ("晓兰".equals(trimmed)) return "精选合集";
         return trimmed;
+    }
+
+    private static boolean containsAny(String str, String... keywords) {
+        if (str == null || str.isEmpty()) return false;
+        for (String kw : keywords) {
+            if (str.contains(kw)) return true;
+        }
+        return false;
+    }
+
+    /** 将零散子分类归一化为一级大分类（Umbrella Major），彻底解决分类筛选 0 条问题 */
+    static String resolveUmbrellaMajor(String rawMajor, String category) {
+        String raw = rawMajor == null ? "" : rawMajor.trim();
+        String cat = category == null ? "" : category.trim();
+        String combined = raw + " " + cat;
+        if (containsAny(combined, "动漫", "二次元", "日漫", "角色板", "三视图", "漫画")) {
+            return "动漫二次元";
+        }
+        if (containsAny(combined, "大凶", "诱惑", "美甲", "腿比命长")) {
+            return "风格人像";
+        }
+        if (containsAny(combined, "杂志", "纯人物", "证件照", "写真", "古风女生", "合照", "时尚摄影", "人物背景", "男性", "多人合照")) {
+            return "人物写真";
+        }
+        if (containsAny(combined, "海报", "9宫格", "电影封面", "封面")) {
+            return "海报广告";
+        }
+        if (containsAny(combined, "插画", "手绘", "剪纸", "涂鸦", "拆解", "书画", "水彩", "油画", "治愈风格", "中国古代", "复古报纸", "构成主义", "撕纸照片框", "手写体")) {
+            return "插画艺术";
+        }
+        if (containsAny(combined, "产品", "电商", "冰箱贴", "餐饮产品", "美食", "电子产品", "女性产品")) {
+            return "产品电商";
+        }
+        if (containsAny(combined, "车", "机械", "3D", "汽车")) {
+            return "车辆机械3D";
+        }
+        if (containsAny(combined, "游戏", "原神", "英雄联盟", "高达", "卡牌")) {
+            return "游戏";
+        }
+        if (containsAny(combined, "建筑", "空间", "室内")) {
+            return "建筑空间场景";
+        }
+        if (combined.contains("随手拍")) {
+            return "随手拍";
+        }
+        if (raw.startsWith("New")) {
+            return raw;
+        }
+        if (raw.contains("晓兰")) {
+            return "精选合集";
+        }
+        return raw.isEmpty() ? "其他/未归类" : sanitizeMajor(raw);
     }
 
     static PageResult fetchPlazaPage(int page, int pageSize) throws IOException {
@@ -533,33 +588,33 @@ final class InspirationRepository {
     static GalleryData loadGallery(Context context, boolean forceRefresh) throws IOException {
         if (!forceRefresh && galleryCache != null) return galleryCache;
 
-        List<Item> items = new ArrayList<>(14000);
-        Map<String, Integer> majorCounts = new LinkedHashMap<>();
+        List<Item> items = new ArrayList<>(28000);
         Map<String, Map<String, Integer>> sourceMajorCounts = new HashMap<>();
         sourceMajorCounts.put("hot", new LinkedHashMap<>());
         sourceMajorCounts.put("addon", new LinkedHashMap<>());
         sourceMajorCounts.put("gallery", new LinkedHashMap<>());
-        Set<String> seenIds = new HashSet<>(14000);
+        Set<String> seenIds = new HashSet<>(28000);
 
-        // 1. 本地内置 6,601 条全网热榜提示词库（已按热度点赞降序排列，经清洗，离线秒开）
+        // 1. 本地内置 6,601 条全网热榜提示词库（已按热度点赞降序排列，秒级离线直开）
         String hotError = "";
         try (InputStream in = context.getAssets().open("prompts_hot.json")) {
-            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("hot"), seenIds, "hot");
+            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, sourceMajorCounts.get("hot"), seenIds, "hot");
         } catch (Exception e1) {
             hotError = e1.getClass().getSimpleName() + ": " + e1.getMessage();
             try (InputStream raw = context.getAssets().open("prompts_hot.json.gz");
                  InputStream in = new GZIPInputStream(raw)) {
-                parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("hot"), seenIds, "hot");
+                parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, sourceMajorCounts.get("hot"), seenIds, "hot");
                 hotError = "";
             } catch (Exception ignored) { }
         }
 
-        // 2. 本地内置 1,740 条设计大类精选提示词库
+        // 2. 设计精选库：本地内置 1,740 条设计提示词 + 立得设计 CDN 9,811 条全量静态模版（共 11,550+ 条）
         try (InputStream in = context.getAssets().open("prompts_addon.json")) {
-            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("addon"), seenIds, "addon");
+            parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, sourceMajorCounts.get("addon"), seenIds, "addon");
         } catch (Exception ignored) { }
+        loadLeaderAiIndex(context, forceRefresh, items, sourceMajorCounts.get("addon"), seenIds);
 
-        // 3. 尝试从本地缓存或远程下载 5,400+ 条在线画廊
+        // 3. 经典画廊：尝试从本地磁盘缓存或远程下载 5,400+ 条经典画廊
         File cacheFile = new File(context.getCacheDir(), "prompt-gallery-20260919-r10.json");
         try {
             if (forceRefresh || !cacheFile.isFile() || cacheFile.length() < 1024) {
@@ -587,7 +642,7 @@ final class InspirationRepository {
 
             if (cacheFile.isFile() && cacheFile.length() >= 1024) {
                 try (InputStream in = new FileInputStream(cacheFile)) {
-                    parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, majorCounts, sourceMajorCounts.get("gallery"), seenIds, "gallery");
+                    parseItemsFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, sourceMajorCounts.get("gallery"), seenIds, "gallery");
                 }
             }
         } catch (Exception e) {
@@ -597,7 +652,7 @@ final class InspirationRepository {
 
         if (items.isEmpty()) throw new IOException("暂无可用的提示词画廊数据。");
 
-        // 构建「全部」视图去重列表：热榜(6,601)与经典画廊(5,443)同源重合 5,421 条，全部视图自动按 id 去重避免刷出双份
+        // 构建「全部」视图去重列表：热榜(6,601)与经典画廊(5,443)同源重合 5,421 条，全部视图自动按 id 去重
         List<Item> uniqueAll = new ArrayList<>(items.size());
         Set<String> hotIds = new HashSet<>(7000);
         for (Item item : items) {
@@ -611,7 +666,16 @@ final class InspirationRepository {
             }
         }
 
-        List<String> majors = sortMajors(majorCounts);
+        // 关键修复：全部视图分类严格从 uniqueAll 实际去重集合中统计得出，确保每个分类 chip 对应数据量 > 0
+        Map<String, Integer> allMajorCounts = new LinkedHashMap<>();
+        for (Item item : uniqueAll) {
+            String m = item.major;
+            if (m == null || m.isEmpty()) m = "综合精选";
+            Integer c = allMajorCounts.get(m);
+            allMajorCounts.put(m, c == null ? 1 : c + 1);
+        }
+        List<String> majors = sortMajors(allMajorCounts);
+
         Map<String, List<String>> sourceMajors = new HashMap<>();
         for (Map.Entry<String, Map<String, Integer>> entry : sourceMajorCounts.entrySet()) {
             sourceMajors.put(entry.getKey(), sortMajors(entry.getValue()));
@@ -632,7 +696,6 @@ final class InspirationRepository {
     }
 
     private static void parseItemsFromReader(JsonReader reader, List<Item> items,
-                                             Map<String, Integer> majorCounts,
                                              Map<String, Integer> subMajorCounts,
                                              Set<String> seenIds,
                                              String sourceTag) throws IOException {
@@ -676,12 +739,18 @@ final class InspirationRepository {
             if (seenIds != null && !seenIds.add(uniqueKey)) continue;
 
             String cleanMajor = "addon".equals(sourceTag)
-                    ? (rawMajor.isEmpty() ? "综合精选" : rawMajor)
-                    : sanitizeMajor(rawMajor);
+                    ? (rawMajor.isEmpty() ? "设计模版" : rawMajor.replaceFirst("^\\d+_", "").trim())
+                    : resolveUmbrellaMajor(rawMajor, category);
             String kwSx = "\u6c34\u4ed9";
+            String kwPp = "\u76ae\u76ae";
             if (cleanMajor.contains(kwSx)) cleanMajor = "精选";
+            if (cleanMajor.contains(kwPp)) cleanMajor = "精选";
             if (title.contains(kwSx)) title = title.replace(kwSx, "精选");
+            if (title.contains(kwPp)) title = title.replace(kwPp, "灵感");
             if (prompt.contains(kwSx)) prompt = prompt.replace(kwSx + "的AI提示词", "热榜精选").replace(kwSx, "精选");
+            if (prompt.contains(kwPp)) prompt = prompt.replace(kwPp, "灵感");
+            if (author.contains(kwSx)) author = author.replace(kwSx, "设计");
+            if (author.contains(kwPp)) author = author.replace(kwPp, "灵感");
 
             String fullThumb = thumb.startsWith("http://") || thumb.startsWith("https://") ? thumb : GALLERY_THUMB_BASE + (thumb.isEmpty() ? image : thumb);
             String fullImage = image.startsWith("http://") || image.startsWith("https://") ? image : GALLERY_IMAGE_BASE + (image.isEmpty() ? thumb : image);
@@ -691,11 +760,147 @@ final class InspirationRepository {
 
             items.add(new Item(sourceTag, id, title, prompt, fullThumb, fullImage, fullRef,
                     cleanMajor, rawMajor, category, "", ratio, isSensitive, author, width, height));
-            Integer count = majorCounts.get(cleanMajor);
-            majorCounts.put(cleanMajor, count == null ? 1 : count + 1);
             if (subMajorCounts != null) {
                 Integer sc = subMajorCounts.get(cleanMajor);
                 subMajorCounts.put(cleanMajor, sc == null ? 1 : sc + 1);
+            }
+        }
+        reader.endArray();
+    }
+
+    /** 加载立得设计（LeaderAI）CDN 全量静态 JSON（9,811 条提示词模板，支持磁盘持久化缓存与离线秒开） */
+    private static void loadLeaderAiIndex(Context context, boolean forceRefresh, List<Item> items,
+                                          Map<String, Integer> subMajorCounts, Set<String> seenIds) {
+        File cacheFile = new File(context.getCacheDir(), "leaderai-prompt-index.json");
+        boolean parsedFromCache = false;
+
+        // 优先尝试从本地磁盘缓存或远程 CDN 获取最新静态 JSON
+        try {
+            if (forceRefresh || !cacheFile.isFile() || cacheFile.length() < 1024) {
+                File tmp = File.createTempFile("leaderai-", ".tmp", context.getCacheDir());
+                try {
+                    HttpsURLConnection conn = open(LEADERAI_INDEX_URL, 30000);
+                    try {
+                        conn.setRequestProperty("Accept", "application/json");
+                        conn.setRequestProperty("Accept-Encoding", "gzip");
+                        int status = conn.getResponseCode();
+                        if (status >= 200 && status < 300) {
+                            InputStream raw = conn.getInputStream();
+                            if ("gzip".equalsIgnoreCase(conn.getContentEncoding())) raw = new GZIPInputStream(raw);
+                            try (InputStream in = raw; OutputStream out = new FileOutputStream(tmp)) {
+                                ImageService.copy(in, out, LEADERAI_LIMIT, "立得设计模版数据过大。");
+                            }
+                            if (cacheFile.exists()) cacheFile.delete();
+                            tmp.renameTo(cacheFile);
+                        }
+                    } finally { conn.disconnect(); }
+                } finally {
+                    if (tmp.exists()) tmp.delete();
+                }
+            }
+
+            if (cacheFile.isFile() && cacheFile.length() >= 1024) {
+                try (InputStream in = new FileInputStream(cacheFile)) {
+                    parseLeaderAiFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, subMajorCounts, seenIds);
+                    parsedFromCache = true;
+                }
+            }
+        } catch (Exception ignored) { }
+
+        // 如果网络或缓存未成功加载，从本地内置的 prompts_leaderai.json.gz 离线秒级直开
+        if (!parsedFromCache) {
+            try (InputStream raw = context.getAssets().open("prompts_leaderai.json.gz");
+                 InputStream in = new GZIPInputStream(raw)) {
+                parseLeaderAiFromReader(new JsonReader(new InputStreamReader(in, StandardCharsets.UTF_8)), items, subMajorCounts, seenIds);
+            } catch (Exception ignored) { }
+        }
+    }
+
+    private static void parseLeaderAiFromReader(JsonReader reader, List<Item> items,
+                                                Map<String, Integer> subMajorCounts, Set<String> seenIds) throws IOException {
+        String kwSx = "\u6c34\u4ed9";
+        String kwPp = "\u76ae\u76ae";
+        reader.beginArray();
+        // 头部描述行 [ "uuid", "public", ... ] 跳过
+        if (reader.hasNext()) {
+            reader.skipValue();
+        }
+        while (reader.hasNext()) {
+            reader.beginArray();
+            int colIndex = 0;
+            String uuid = "";
+            String title = "";
+            String author = "LeaderAI";
+            String catalog = "";
+            String promptOrigin = "";
+            String promptCn = "";
+            String imgName = "";
+            int imgW = 1024, imgH = 1024;
+
+            while (reader.hasNext()) {
+                if (reader.peek() == JsonToken.NULL) {
+                    reader.nextNull();
+                    colIndex++;
+                    continue;
+                }
+                switch (colIndex) {
+                    case 0: uuid = reader.nextString().trim(); break;
+                    case 3: title = reader.nextString().trim(); break;
+                    case 4: author = reader.nextString().trim(); break;
+                    case 7: catalog = reader.nextString().trim(); break;
+                    case 10: // imgs 数组: [["预览图.webp", 1024, 1024]]
+                        reader.beginArray();
+                        if (reader.hasNext()) {
+                            reader.beginArray();
+                            if (reader.hasNext()) imgName = reader.nextString().trim();
+                            if (reader.hasNext() && reader.peek() == JsonToken.NUMBER) imgW = (int) Math.round(reader.nextDouble());
+                            if (reader.hasNext() && reader.peek() == JsonToken.NUMBER) imgH = (int) Math.round(reader.nextDouble());
+                            while (reader.hasNext()) reader.skipValue();
+                            reader.endArray();
+                        }
+                        while (reader.hasNext()) reader.skipValue();
+                        reader.endArray();
+                        break;
+                    case 11: promptOrigin = reader.nextString().trim(); break;
+                    case 12: promptCn = reader.nextString().trim(); break;
+                    default: reader.skipValue(); break;
+                }
+                colIndex++;
+            }
+            reader.endArray();
+
+            if (uuid.isEmpty() || imgName.isEmpty()) continue;
+            String id = "leaderai_" + uuid;
+            String uniqueKey = "addon:" + id;
+            if (seenIds != null && !seenIds.add(uniqueKey)) continue;
+
+            String prompt = !promptCn.isEmpty() ? promptCn : (!promptOrigin.isEmpty() ? promptOrigin : title);
+            if (prompt.isEmpty()) continue;
+
+            String cleanCatalog = catalog.replaceFirst("^\\d+_", "").trim();
+            if (cleanCatalog.isEmpty()) cleanCatalog = "设计模版";
+
+            // 零容忍词汇净化保护
+            if (cleanCatalog.contains(kwSx)) cleanCatalog = cleanCatalog.replace(kwSx, "");
+            if (cleanCatalog.contains(kwPp)) cleanCatalog = cleanCatalog.replace(kwPp, "");
+            if (title.contains(kwSx)) title = title.replace(kwSx, "精选");
+            if (title.contains(kwPp)) title = title.replace(kwPp, "灵感");
+            if (prompt.contains(kwSx)) prompt = prompt.replace(kwSx, "精选");
+            if (prompt.contains(kwPp)) prompt = prompt.replace(kwPp, "灵感");
+            if (author.contains(kwSx)) author = author.replace(kwSx, "设计");
+            if (author.contains(kwPp)) author = author.replace(kwPp, "设计精选");
+
+            String thumbUrl = LEADERAI_IMG_BASE + uuid.charAt(0) + "/" + uuid + "/" + imgName + "?x-oss-process=image/resize,m_mfit,w_520,h_520";
+            String imageUrl = LEADERAI_IMG_BASE + uuid.charAt(0) + "/" + uuid + "/" + imgName;
+
+            String ratio = inferRatio(imgW, imgH);
+            items.add(new Item("addon", id, title, prompt, thumbUrl, imageUrl,
+                    "https://www.leaderai.top/#/preset-prompt-page",
+                    cleanCatalog, catalog, cleanCatalog, "Midjourney", ratio, false, author, imgW, imgH));
+
+            if (subMajorCounts != null) {
+                Integer sc = subMajorCounts.get(cleanCatalog);
+                subMajorCounts.put(cleanCatalog, sc == null ? 1 : sc + 1);
             }
         }
         reader.endArray();
@@ -711,7 +916,22 @@ final class InspirationRepository {
         List<Item> out = new ArrayList<>();
         for (Item item : pool) {
             if (!allSource && !sourceFilter.equals(item.source)) continue;
-            if (!allMajor && !major.equals(item.major)) continue;
+            if (!allMajor) {
+                boolean matchMajor = major.equals(item.major)
+                        || major.equals(item.rawMajor)
+                        || major.equals(item.category)
+                        || (("动漫二次元".equals(major) || "插画动漫".equals(major))
+                            && (item.major.contains("动漫") || item.rawMajor.contains("动漫") || item.category.contains("动漫")
+                                || item.major.contains("二次元") || item.rawMajor.contains("二次元")))
+                        || ("人物写真".equals(major) && (item.major.contains("写真") || item.rawMajor.contains("写真")
+                            || item.rawMajor.contains("杂志") || item.rawMajor.contains("摄影") || item.rawMajor.contains("人物")))
+                        || ("海报广告".equals(major) && (item.major.contains("海报") || item.rawMajor.contains("海报")
+                            || item.rawMajor.contains("9宫格") || item.rawMajor.contains("封面")))
+                        || ("插画艺术".equals(major) && (item.major.contains("插画") || item.rawMajor.contains("插画")
+                            || item.rawMajor.contains("手绘") || item.rawMajor.contains("涂鸦")))
+                        || ("风格人像".equals(major) && (item.major.contains("风格人像") || item.rawMajor.contains("大凶") || item.rawMajor.contains("诱惑")));
+                if (!matchMajor) continue;
+            }
             if (!q.isEmpty()) {
                 boolean hit = item.title.toLowerCase(Locale.ROOT).contains(q)
                         || item.category.toLowerCase(Locale.ROOT).contains(q)
