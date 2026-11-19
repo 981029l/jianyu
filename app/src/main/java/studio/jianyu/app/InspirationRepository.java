@@ -27,6 +27,9 @@ final class InspirationRepository {
     private static final String GALLERY_CATALOG_URL = BASE + "/releases/prompt-gallery-20260919-r10/data/catalog.json";
     private static final String GALLERY_IMAGE_BASE = BASE + "/prompt-assets/";
     private static final String GALLERY_THUMB_BASE = BASE + "/prompt-thumbs/";
+    private static final String AIART_API_BASE = "https://aiart.pics/api/prompts";
+    private static final String AIART_IMG_BASE = "https://img1.aiart.pics/";
+    private static final String OPENNANA_API_BASE = "https://api.opennana.com/api/prompts";
     private static final int JSON_LIMIT = 4 * 1024 * 1024;
     private static final int CATALOG_LIMIT = 20 * 1024 * 1024;
     private static final int IMAGE_LIMIT = 12 * 1024 * 1024;
@@ -37,17 +40,17 @@ final class InspirationRepository {
         final String source;
         final String id;
         final String title;
-        final String prompt;
+        volatile String prompt;
         final String thumbUrl;
-        final String imageUrl;
+        volatile String imageUrl;
         final String refUrl;
         final String major;
         final String rawMajor;
-        final String category;
-        final String model;
+        volatile String category;
+        volatile String model;
         final String ratio;
         final boolean nsfw;
-        final String author;
+        volatile String author;
         final int width;
         final int height;
 
@@ -63,22 +66,34 @@ final class InspirationRepository {
             this.source = source;
             this.id = id;
             this.title = title;
-            this.prompt = prompt;
+            this.prompt = prompt == null ? "" : prompt;
             this.thumbUrl = thumbUrl;
-            this.imageUrl = imageUrl;
+            this.imageUrl = imageUrl == null ? "" : imageUrl;
             this.refUrl = refUrl == null ? "" : refUrl;
             this.major = major;
             this.rawMajor = rawMajor;
-            this.category = category;
-            this.model = model;
+            this.category = category == null ? "" : category;
+            this.model = model == null ? "" : model;
             this.ratio = ratio;
             this.nsfw = nsfw;
-            this.author = author;
+            this.author = author == null ? "" : author;
             this.width = width;
             this.height = height;
         }
 
         String uniqueKey() { return source + ":" + id; }
+
+        boolean needsDetailFetch() {
+            return (prompt == null || prompt.isEmpty()) && ("aiart".equals(source) || "opennana".equals(source));
+        }
+
+        synchronized void applyDetail(String fullPrompt, String fullImageUrl, String detailModel, String detailAuthor, String detailCategory) {
+            if (fullPrompt != null && !fullPrompt.isEmpty()) this.prompt = fullPrompt;
+            if (fullImageUrl != null && !fullImageUrl.isEmpty()) this.imageUrl = fullImageUrl;
+            if (detailModel != null && !detailModel.isEmpty()) this.model = detailModel;
+            if (detailAuthor != null && !detailAuthor.isEmpty()) this.author = detailAuthor;
+            if (detailCategory != null && !detailCategory.isEmpty()) this.category = detailCategory;
+        }
 
         float aspectHeightOverWidth() {
             if (width > 0 && height > 0) {
@@ -249,6 +264,270 @@ final class InspirationRepository {
         } finally {
             conn.disconnect();
         }
+    }
+
+    // ==================== 发现灵感（aiart.pics + opennana.com 在线分页拉取） ====================
+
+    static PageResult fetchDiscoverPage(String providerFilter, String query, int page, int pageSize) throws IOException {
+        String p = providerFilter == null ? "all" : providerFilter.trim().toLowerCase(Locale.ROOT);
+        String q = query == null ? "" : query.trim();
+        if ("aiart".equals(p)) {
+            return fetchAiArtPage(q, page, pageSize);
+        }
+        if ("opennana".equals(p)) {
+            return fetchOpenNanaPage(q, page, pageSize);
+        }
+        int half = Math.max(6, pageSize / 2);
+        final PageResult[] results = new PageResult[2];
+        final IOException[] errors = new IOException[2];
+        Thread t1 = new Thread(() -> {
+            try {
+                results[0] = fetchAiArtPage(q, page, half);
+            } catch (IOException e) {
+                errors[0] = e;
+            }
+        }, "discover-aiart");
+        Thread t2 = new Thread(() -> {
+            try {
+                results[1] = fetchOpenNanaPage(q, page, half);
+            } catch (IOException e) {
+                errors[1] = e;
+            }
+        }, "discover-opennana");
+        t1.start();
+        t2.start();
+        try {
+            t1.join(22000);
+            t2.join(22000);
+        } catch (InterruptedException ignored) { }
+
+        if (results[0] == null && results[1] == null) {
+            if (errors[0] != null) throw errors[0];
+            if (errors[1] != null) throw errors[1];
+            throw new IOException("发现灵感加载失败，请检查网络。");
+        }
+        List<Item> aList = results[0] != null ? results[0].items : Collections.emptyList();
+        List<Item> oList = results[1] != null ? results[1].items : Collections.emptyList();
+        List<Item> merged = new ArrayList<>(aList.size() + oList.size());
+        int maxLen = Math.max(aList.size(), oList.size());
+        for (int i = 0; i < maxLen; i++) {
+            if (i < aList.size()) merged.add(aList.get(i));
+            if (i < oList.size()) merged.add(oList.get(i));
+        }
+        boolean hasMore = (results[0] != null && results[0].hasMore) || (results[1] != null && results[1].hasMore);
+        return new PageResult(merged, hasMore);
+    }
+
+    private static PageResult fetchAiArtPage(String query, int page, int limit) throws IOException {
+        int offset = Math.max(0, (page - 1) * limit);
+        StringBuilder url = new StringBuilder(AIART_API_BASE)
+                .append("?sort=newest&mediaType=image&limit=").append(limit)
+                .append("&offset=").append(offset);
+        if (query != null && !query.isEmpty()) {
+            url.append("&search=").append(java.net.URLEncoder.encode(query, "UTF-8"));
+        }
+        JSONObject root = getJson(url.toString(), "https://aiart.pics/");
+        JSONArray arr = root.optJSONArray("prompts");
+        List<Item> out = new ArrayList<>();
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.optJSONObject(i);
+                if (obj == null) continue;
+                String id = optStr(obj, "id");
+                if (id.isEmpty()) continue;
+
+                String title = "";
+                JSONObject titleObj = obj.optJSONObject("title");
+                if (titleObj != null) {
+                    title = optStr(titleObj, "zh");
+                    if (title.isEmpty()) title = optStr(titleObj, "en");
+                } else {
+                    title = optStr(obj, "title");
+                }
+
+                String thumbUrl = "";
+                String imageUrl = "";
+                int width = 1024, height = 1024;
+                JSONArray imgs = obj.optJSONArray("images");
+                if (imgs != null && imgs.length() > 0) {
+                    JSONObject img0 = imgs.optJSONObject(0);
+                    if (img0 != null) {
+                        String path = optStr(img0, "path");
+                        String sPath = optStr(img0, "sPath");
+                        if (sPath.isEmpty()) sPath = path;
+                        if (path.isEmpty()) path = sPath;
+                        thumbUrl = toAiArtImgUrl(sPath);
+                        imageUrl = toAiArtImgUrl(path);
+                        int w = img0.optInt("width", 0);
+                        int h = img0.optInt("height", 0);
+                        if (w > 0 && h > 0) {
+                            width = w;
+                            height = h;
+                        }
+                    }
+                }
+                if (thumbUrl.isEmpty() && imageUrl.isEmpty()) continue;
+
+                String rawModel = optStr(obj, "model");
+                String displayModel = normalizeDiscoverModel(rawModel);
+                String category = "AIART";
+                JSONArray tags = obj.optJSONArray("tags");
+                if (tags != null && tags.length() > 0) {
+                    String t0 = tags.optString(0, "").trim();
+                    if (!t0.isEmpty()) category = "AIART · " + t0;
+                }
+                String author = "";
+                JSONObject authorObj = obj.optJSONObject("author");
+                if (authorObj != null) {
+                    author = optStr(authorObj, "name");
+                    if (author.isEmpty()) author = optStr(authorObj, "username");
+                }
+                String ratio = inferRatio(width, height);
+                out.add(new Item("aiart", id, title, "", thumbUrl, imageUrl,
+                        "AIART", "AIART", category, displayModel, ratio, false, author, width, height));
+            }
+        }
+        int total = root.optInt("total", 0);
+        boolean hasMore = (offset + out.size() < total) && !out.isEmpty();
+        return new PageResult(out, hasMore);
+    }
+
+    private static PageResult fetchOpenNanaPage(String query, int page, int limit) throws IOException {
+        StringBuilder url = new StringBuilder(OPENNANA_API_BASE)
+                .append("?page=").append(Math.max(1, page))
+                .append("&limit=").append(limit)
+                .append("&sort=reviewed_at&order=DESC&media_type=image&access_type=0");
+        if (query != null && !query.isEmpty()) {
+            url.append("&search=").append(java.net.URLEncoder.encode(query, "UTF-8"));
+        }
+        JSONObject root = getJson(url.toString(), "https://opennana.com/");
+        JSONObject data = root.optJSONObject("data");
+        if (data == null) return new PageResult(Collections.emptyList(), false);
+        JSONArray arr = data.optJSONArray("items");
+        List<Item> out = new ArrayList<>();
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject obj = arr.optJSONObject(i);
+                if (obj == null) continue;
+                String slug = optStr(obj, "slug");
+                if (slug.isEmpty()) slug = String.valueOf(obj.opt("id"));
+                if (slug.isEmpty()) continue;
+
+                String title = optStr(obj, "title");
+                String thumbUrl = optStr(obj, "cover_image");
+                if (thumbUrl.isEmpty()) continue;
+                String imageUrl = deriveOpenNanaFullUrl(thumbUrl);
+
+                out.add(new Item("opennana", slug, title, "", thumbUrl, imageUrl,
+                        "OpenNana", "OpenNana", "OpenNana 精选", "GPT", "1:1", false, "", 1024, 1024));
+            }
+        }
+        JSONObject pag = data.optJSONObject("pagination");
+        int totalPages = pag != null ? pag.optInt("total_pages", page) : page;
+        boolean hasMore = page < totalPages && !out.isEmpty();
+        return new PageResult(out, hasMore);
+    }
+
+    static String fetchDiscoverDetail(Context context, Item item) throws IOException {
+        if (item == null) return "";
+        if (!item.needsDetailFetch()) return item.prompt;
+        if ("aiart".equals(item.source)) {
+            String url = AIART_API_BASE + "/" + android.net.Uri.encode(item.id);
+            JSONObject root = getJson(url, "https://aiart.pics/");
+            JSONObject data = root.optJSONObject("data");
+            if (data != null) {
+                JSONArray prompts = data.optJSONArray("prompts");
+                StringBuilder sb = new StringBuilder();
+                if (prompts != null) {
+                    for (int i = 0; i < prompts.length(); i++) {
+                        String line = prompts.optString(i, "").trim();
+                        if (!line.isEmpty()) {
+                            if (sb.length() > 0) sb.append("\n\n");
+                            sb.append(line);
+                        }
+                    }
+                }
+                String fullPrompt = sb.toString().trim();
+                if (fullPrompt.isEmpty()) fullPrompt = item.title;
+                item.applyDetail(fullPrompt, "", "", "", "");
+                if (context != null) updateFavoriteIfPresent(context, item);
+                return item.prompt;
+            }
+        } else if ("opennana".equals(item.source)) {
+            String url = OPENNANA_API_BASE + "/" + android.net.Uri.encode(item.id);
+            JSONObject root = getJson(url, "https://opennana.com/");
+            JSONObject data = root.optJSONObject("data");
+            if (data != null) {
+                JSONArray prompts = data.optJSONArray("prompts");
+                StringBuilder sb = new StringBuilder();
+                if (prompts != null) {
+                    for (int i = 0; i < prompts.length(); i++) {
+                        JSONObject pObj = prompts.optJSONObject(i);
+                        String text = pObj != null ? optStr(pObj, "text") : prompts.optString(i, "").trim();
+                        if (!text.isEmpty()) {
+                            if (sb.length() > 0) sb.append("\n\n");
+                            sb.append(text);
+                        }
+                    }
+                }
+                String fullPrompt = sb.toString().trim();
+                if (fullPrompt.isEmpty()) fullPrompt = item.title;
+                String fullImg = firstUrl(data.optJSONArray("images"));
+                String rawModel = optStr(data, "model");
+                String displayModel = normalizeDiscoverModel(rawModel);
+                String author = optStr(data, "source_name");
+                String cat = rawModel.isEmpty() ? "OpenNana 精选" : ("OpenNana · " + rawModel);
+                item.applyDetail(fullPrompt, fullImg, displayModel, author, cat);
+                if (context != null) updateFavoriteIfPresent(context, item);
+                return item.prompt;
+            }
+        }
+        return item.prompt;
+    }
+
+    private static JSONObject getJson(String url, String referer) throws IOException {
+        HttpsURLConnection conn = open(url, 20000);
+        try {
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("Accept-Encoding", "gzip");
+            if (referer != null && !referer.isEmpty()) {
+                conn.setRequestProperty("Referer", referer);
+            }
+            int status = conn.getResponseCode();
+            if (status < 200 || status >= 300) {
+                throw new IOException("在线灵感加载失败（HTTP " + status + "）");
+            }
+            InputStream raw = conn.getInputStream();
+            if ("gzip".equalsIgnoreCase(conn.getContentEncoding())) raw = new GZIPInputStream(raw);
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            try (InputStream in = raw) {
+                ImageService.copy(in, out, JSON_LIMIT, "灵感数据过大。");
+            }
+            return new JSONObject(new String(out.toByteArray(), StandardCharsets.UTF_8));
+        } catch (org.json.JSONException e) {
+            throw new IOException("在线灵感数据解析失败。");
+        } finally {
+            conn.disconnect();
+        }
+    }
+
+    private static String toAiArtImgUrl(String path) {
+        if (path == null || path.isEmpty()) return "";
+        if (path.startsWith("https://") || path.startsWith("http://")) return path;
+        return AIART_IMG_BASE + (path.startsWith("/") ? path.substring(1) : path);
+    }
+
+    private static String deriveOpenNanaFullUrl(String coverUrl) {
+        if (coverUrl == null || coverUrl.isEmpty()) return "";
+        String full = coverUrl.replace("/pthumbs/", "/");
+        return full.replaceFirst("-480(\\.[a-zA-Z0-9]+)$", "$1");
+    }
+
+    private static String normalizeDiscoverModel(String rawModel) {
+        if (rawModel == null || rawModel.isEmpty()) return "GPT";
+        String lower = rawModel.toLowerCase(Locale.ROOT);
+        if (lower.contains("grok")) return "Grok";
+        return "GPT";
     }
 
     static GalleryData loadGallery(Context context, boolean forceRefresh) throws IOException {
@@ -486,7 +765,34 @@ final class InspirationRepository {
         JSONArray arr = new JSONArray();
         for (Item item : list) arr.put(item.toJson());
         context.getSharedPreferences(FAV_PREFS, Context.MODE_PRIVATE).edit().putString(FAV_KEY, arr.toString()).apply();
+        if (!removed && target.needsDetailFetch()) {
+            Context appCtx = context.getApplicationContext();
+            IMAGE_POOL.execute(() -> {
+                try {
+                    fetchDiscoverDetail(appCtx, target);
+                } catch (Exception ignored) { }
+            });
+        }
         return !removed;
+    }
+
+    static synchronized void updateFavoriteIfPresent(Context context, Item target) {
+        if (context == null || target == null) return;
+        List<Item> list = getFavorites(context);
+        String key = target.uniqueKey();
+        boolean updated = false;
+        for (int i = 0; i < list.size(); i++) {
+            if (key.equals(list.get(i).uniqueKey())) {
+                list.set(i, target);
+                updated = true;
+                break;
+            }
+        }
+        if (updated) {
+            JSONArray arr = new JSONArray();
+            for (Item item : list) arr.put(item.toJson());
+            context.getSharedPreferences(FAV_PREFS, Context.MODE_PRIVATE).edit().putString(FAV_KEY, arr.toString()).apply();
+        }
     }
 
     // ==================== 渐进式图片加载与缓存 ====================
