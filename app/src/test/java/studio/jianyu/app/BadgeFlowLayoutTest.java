@@ -1,6 +1,8 @@
 package studio.jianyu.app;
 
 import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.pm.ApplicationInfo;
 import android.graphics.Rect;
 import android.view.View;
 import android.view.ViewGroup;
@@ -52,7 +54,13 @@ public class BadgeFlowLayoutTest {
     }
 
     @Test public void marginsAndRtlStillKeepBadgesInsideBoundsWithoutOverlap() {
-        Context context = RuntimeEnvironment.getApplication();
+        Context application = RuntimeEnvironment.getApplication();
+        ApplicationInfo rtlApplication = new ApplicationInfo(application.getApplicationInfo());
+        rtlApplication.flags |= ApplicationInfo.FLAG_SUPPORTS_RTL;
+        rtlApplication.targetSdkVersion = 28;
+        Context context = new ContextWrapper(application) {
+            @Override public ApplicationInfo getApplicationInfo() { return rtlApplication; }
+        };
         BadgeFlowLayout flow = new BadgeFlowLayout(context);
         flow.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
         flow.setPadding(7, 9, 11, 13);
@@ -63,6 +71,7 @@ public class BadgeFlowLayoutTest {
             flow.addView(badge, params);
         }
         measure(flow, 220);
+        assertEquals(View.LAYOUT_DIRECTION_RTL, flow.getLayoutDirection());
         assertChildrenFit(flow);
         assertTrue(flow.getChildAt(0).getLeft() > flow.getChildAt(1).getLeft());
         assertTrue(flow.getChildAt(2).getTop() > flow.getChildAt(0).getBottom());
