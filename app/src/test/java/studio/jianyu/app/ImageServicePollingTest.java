@@ -24,6 +24,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
+import org.robolectric.shadows.ShadowSystemClock;
 import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -49,7 +50,6 @@ public class ImageServicePollingTest {
         doReturn(Arrays.asList("test-only-key")).when(service).activeKeysLine1();
         doReturn(Arrays.asList("test-only-key")).when(service).activeKeysLine2();
         doReturn(true).when(service).isDirectMode();
-        doAnswer(call -> clock.get()).when(service).downloadClockMillis();
         doAnswer(call -> {
             long wait = call.getArgument(0);
             waits.add(wait);
@@ -196,41 +196,43 @@ public class ImageServicePollingTest {
         }
     }
 
-    @Test public void slowContinuousDownloadHasTotalDeadlineAndKeepsOriginalUrl() throws Exception {
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void slowLineTwoDownloadContinuesPastThreeMinutesAndSavesCompleteArtwork() throws Exception {
         retainDownload();
-        InputStream slow = new InputStream() {
-            @Override public int read() { throw new AssertionError("Use buffered reads"); }
-            @Override public int read(byte[] buffer, int offset, int length) {
-                clock.addAndGet(70000);
-                buffer[offset] = 1;
-                return 1;
-            }
-        };
-        HttpsURLConnection download = imageResponse(slow, -1);
+        byte[] png = pngBytes();
+        List<String> labels = new ArrayList<>();
+        long started = android.os.SystemClock.elapsedRealtime();
+        HttpsURLConnection download = imageResponse(slowChunks(png, labels), png.length);
         doReturn(download).when(service).connect(any(URL.class), anyInt());
-        IOException error = assertThrows(IOException.class, () -> service.run("慢下载", "image-1", "1:1", null, false));
-        assertTrue(error.getMessage().contains("下载超过 3 分钟"));
-        assertEquals("已下载 3 B", service.downloadProgress());
-        assertRetainedDownload();
+        String imageId = service.run("慢下载", "gpt-image-2.5", "1:1", null, false);
+        assertTrue(android.os.SystemClock.elapsedRealtime() - started > 180000);
+        assertTrue(labels.stream().anyMatch(label -> label.matches(".* · 9\\d%")));
+        assertTrue(service.downloadProgress().contains("100%"));
+        assertEquals(png.length, new File(new File(context.getFilesDir(), "images"), imageId).length());
+        assertFalse(service.hasPending());
         assertNoTemporaryImages();
         verify(service, times(1)).connect(any(URL.class), anyInt());
         verify(download, never()).setRequestMethod("POST");
     }
 
-    @Test public void redirectChainSharesDownloadDeadline() throws Exception {
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void redirectChainHasNoCombinedThreeMinuteDeadline() throws Exception {
         retainDownload();
         HttpsURLConnection first = mock(HttpsURLConnection.class);
-        when(first.getResponseCode()).thenAnswer(call -> { clock.addAndGet(100000); return 302; });
+        when(first.getResponseCode()).thenAnswer(call -> { ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(70)); return 302; });
         when(first.getHeaderField("Location")).thenReturn("/second.png");
         HttpsURLConnection second = mock(HttpsURLConnection.class);
-        when(second.getResponseCode()).thenAnswer(call -> { clock.addAndGet(80001); return 302; });
+        when(second.getResponseCode()).thenAnswer(call -> { ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(70)); return 302; });
         when(second.getHeaderField("Location")).thenReturn("/third.png");
-        doReturn(first, second).when(service).connect(any(URL.class), anyInt());
-        IOException error = assertThrows(IOException.class, () -> service.run("重定向", "image-1", "1:1", null, false));
-        assertTrue(error.getMessage().contains("3 分钟"));
-        verify(service).connect(argThat(url -> url.getPath().equals("/second.png")), eq(80000));
-        verify(service, times(2)).connect(any(URL.class), anyInt());
-        assertRetainedDownload();
+        HttpsURLConnection third = mock(HttpsURLConnection.class);
+        when(third.getResponseCode()).thenAnswer(call -> { ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(70)); return 302; });
+        when(third.getHeaderField("Location")).thenReturn("/fourth.png");
+        byte[] png = pngBytes();
+        doReturn(first, second, third, imageResponse(new ByteArrayInputStream(png), png.length)).when(service).connect(any(URL.class), anyInt());
+        assertNotNull(service.run("重定向", "image-1", "1:1", null, false));
+        verify(service).connect(argThat(url -> url.getPath().equals("/second.png")), eq(GenerationDownload.READ_TIMEOUT_MS));
+        verify(service, times(4)).connect(any(URL.class), eq(GenerationDownload.READ_TIMEOUT_MS));
+        assertFalse(service.hasPending());
     }
 
     @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
@@ -295,22 +297,48 @@ public class ImageServicePollingTest {
         assertNoTemporaryImages();
     }
 
-    @Test public void gatewayImageBodyAlsoHasDownloadDeadline() throws Exception {
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void gatewayImageBodyContinuesPastThreeMinutes() throws Exception {
         context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + id, 0).edit().putString("task", "gateway-task").commit();
         doReturn(false).when(service).isDirectMode();
         doReturn("https://example.test/generate").when(service).gatewayEndpoint();
-        InputStream slow = new InputStream() {
+        byte[] png = pngBytes();
+        long started = android.os.SystemClock.elapsedRealtime();
+        doReturn(imageResponse(slowChunks(png, new ArrayList<>()), -1)).when(service).connect(any(URL.class), anyInt());
+        assertNotNull(service.run("网关续取", "image-1", "1:1", null, false));
+        assertTrue(android.os.SystemClock.elapsedRealtime() - started > 180000);
+        assertFalse(service.hasPending());
+        assertNoTemporaryImages();
+    }
+
+    @Test public void readStallStillTimesOutAndKeepsOriginalTask() throws Exception {
+        retainDownload();
+        InputStream timeout = new InputStream() {
+            private boolean received;
             @Override public int read() { throw new AssertionError("Use buffered reads"); }
-            @Override public int read(byte[] buffer, int offset, int length) {
-                clock.addAndGet(GenerationDownload.MAX_DOWNLOAD_MS);
-                return -1;
+            @Override public int read(byte[] buffer, int offset, int length) throws IOException {
+                if (received) throw new SocketTimeoutException("Read timed out");
+                received = true;
+                buffer[offset] = 1;
+                return 1;
             }
         };
-        doReturn(imageResponse(slow, -1)).when(service).connect(any(URL.class), anyInt());
-        IOException error = assertThrows(IOException.class, () -> service.run("网关续取", "image-1", "1:1", null, false));
-        assertTrue(error.getMessage().contains("3 分钟"));
-        assertTrue(service.hasPending());
+        HttpsURLConnection download = imageResponse(timeout, 2048);
+        doReturn(download).when(service).connect(any(URL.class), anyInt());
+        assertThrows(SocketTimeoutException.class, () -> service.run("停滞下载", "gpt-image-2.5", "1:1", null, false));
+        verify(download, atLeastOnce()).setReadTimeout(90000);
+        assertRetainedDownload();
         assertNoTemporaryImages();
+    }
+
+    private InputStream slowChunks(byte[] png, List<String> labels) {
+        return new ByteArrayInputStream(png) {
+            @Override public synchronized int read(byte[] buffer, int offset, int length) {
+                ShadowSystemClock.advanceBy(java.time.Duration.ofSeconds(30));
+                labels.add(service.downloadProgress());
+                return super.read(buffer, offset, Math.min(length, Math.max(1, png.length / 10)));
+            }
+        };
     }
 
     private void retainDownload() {

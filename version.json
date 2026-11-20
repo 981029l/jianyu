@@ -1,6 +1,6 @@
 {
-  "versionCode": 20,
-  "versionName": "0.8.11",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.11/Jianyu-v0.8.11.apk",
-  "releaseNotes": "1. Grok 开启 NSFW 后固定 2:3 竖图，关闭后恢复原比例，补充仅限成年角色的说明。\n2. 创建独立任务后自动清空输入区参考图，原任务保留图片地址供生成与恢复使用。\n3. 移除客户端和网关的 4000 字符限制，完整提交长提示词，显示服务端错误。"
+  "versionCode": 21,
+  "versionName": "0.8.12",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.12/Jianyu-v0.8.12.apk",
+  "releaseNotes": "1. 取消图片下载的 3 分钟总时限，持续传输的图片可继续下载，避免下载到 90% 后被定时中断。\n2. 保留连接与连续读取等待超时、取消等待及图片完整性校验，适用于线路 1、线路 2 和网关图片下载。"
 }

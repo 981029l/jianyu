@@ -60,7 +60,6 @@ final class ImageService {
     boolean isSubmissionUnconfirmed() { return pending.getBoolean("submissionUnconfirmed", false); }
     String gatewayEndpoint() { return BuildConfig.IMAGE_ENDPOINT; }
     HttpsURLConnection connect(URL url, int timeout) throws IOException { return open(url, timeout); }
-    long downloadClockMillis() { return SystemClock.elapsedRealtime(); }
     String downloadProgress() {
         GenerationDownload progress = downloading;
         return progress == null ? "正在连接图片服务器…" : progress.progressLabel();
@@ -461,7 +460,7 @@ final class ImageService {
                 int status = conn.getResponseCode();
                 String type = conn.getContentType();
                 if (status == 200 && (type == null || !type.toLowerCase(Locale.ROOT).contains("json"))) {
-                    try (GenerationDownload progress = beginDownload()) { return saveDownload(conn, progress, prompt, meta); }
+                    return saveDownload(conn, beginDownload(), prompt, meta);
                 }
                 JSONObject result = readJson(conn, status);
                 acknowledgeResponse(status);
@@ -982,58 +981,55 @@ final class ImageService {
     }
 
     private String download(String address, String prompt, String meta) throws IOException {
-        try (GenerationDownload progress = beginDownload()) {
-            URL target = new URL(address);
-            for (int redirects = 0; redirects < GenerationDownload.MAX_REDIRECTS; redirects++) {
-                checkDownload(progress);
-                HttpsURLConnection conn = openTracked(target, progress.timeoutMillis());
-                try {
-                    conn.setConnectTimeout(Math.max(1, Math.min(conn.getConnectTimeout(), progress.timeoutMillis())));
-                    conn.setRequestProperty("Accept-Encoding", "identity");
-                    int status = conn.getResponseCode();
-                    checkDownload(progress);
-                    if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
-                        target = new URL(target, conn.getHeaderField("Location"));
-                        continue;
-                    }
-                    if (status != 200) throw new IOException("图片已生成，但下载失败（HTTP " + status + "），请在生成记录中继续获取。");
-                    return saveDownload(conn, progress, prompt, meta);
-                } catch (IOException error) {
-                    checkDownload(progress);
-                    throw error;
-                } finally {
-                    if (activeConn == conn) activeConn = null;
-                    conn.disconnect();
+        GenerationDownload progress = beginDownload();
+        URL target = new URL(address);
+        for (int redirects = 0; redirects < GenerationDownload.MAX_REDIRECTS; redirects++) {
+            checkDownload();
+            HttpsURLConnection conn = openTracked(target, GenerationDownload.READ_TIMEOUT_MS);
+            try {
+                conn.setRequestProperty("Accept-Encoding", "identity");
+                int status = conn.getResponseCode();
+                checkDownload();
+                if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
+                    target = new URL(target, conn.getHeaderField("Location"));
+                    continue;
                 }
+                if (status != 200) throw new IOException("图片已生成，但下载失败（HTTP " + status + "），请在生成记录中继续获取。");
+                return saveDownload(conn, progress, prompt, meta);
+            } catch (IOException error) {
+                checkDownload();
+                throw error;
+            } finally {
+                if (activeConn == conn) activeConn = null;
+                conn.disconnect();
             }
-            throw new IOException("图片下载地址重定向过多。");
         }
+        throw new IOException("图片下载地址重定向过多。");
     }
 
     private GenerationDownload beginDownload() {
-        GenerationDownload progress = new GenerationDownload(this::downloadClockMillis, this::disconnectActive);
+        GenerationDownload progress = new GenerationDownload();
         downloading = progress;
         reportProgress(GenerationRecord.STATUS_DOWNLOADING);
         return progress;
     }
 
-    private void checkDownload(GenerationDownload progress) throws IOException {
+    private void checkDownload() throws IOException {
         if (cancelled) throw new IOException("已取消本次等待。");
-        progress.check();
     }
 
     private String saveDownload(HttpsURLConnection conn, GenerationDownload progress, String prompt, String meta) throws IOException {
         String encoding = conn.getContentEncoding();
         progress.setTotal(encoding == null || "identity".equalsIgnoreCase(encoding) ? conn.getContentLengthLong() : -1);
-        checkDownload(progress);
-        conn.setReadTimeout(progress.timeoutMillis());
+        checkDownload();
+        conn.setReadTimeout(GenerationDownload.READ_TIMEOUT_MS);
         try (InputStream in = new FilterInputStream(conn.getInputStream()) {
             @Override public int read(byte[] bytes, int offset, int length) throws IOException {
-                checkDownload(progress);
-                conn.setReadTimeout(progress.timeoutMillis());
+                checkDownload();
+                conn.setReadTimeout(GenerationDownload.READ_TIMEOUT_MS);
                 int count = super.read(bytes, offset, length);
                 progress.addBytes(count);
-                checkDownload(progress);
+                checkDownload();
                 if (count == -1) progress.finish();
                 return count;
             }
