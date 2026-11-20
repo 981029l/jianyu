@@ -128,8 +128,9 @@ public final class GenerationRecord {
             } else {
                 list.add(0, record);
             }
-            if (list.size() > MAX_RECORDS) {
-                list = new ArrayList<>(list.subList(0, MAX_RECORDS));
+            for (int i = list.size() - 1; list.size() > MAX_RECORDS && i >= 0; i--) {
+                GenerationRecord older = list.get(i);
+                if (older.status != STATUS_RUNNING && !new ImageService(context, older.recordId).hasPending()) list.remove(i);
             }
             writeBack(context, list);
         }
@@ -153,12 +154,19 @@ public final class GenerationRecord {
         public static synchronized void deleteRecord(Context context, String recordId) {
             if (recordId == null) return;
             List<GenerationRecord> list = getAll(context);
-            list.removeIf(r -> recordId.equals(r.recordId));
+            list.removeIf(r -> recordId.equals(r.recordId) && r.status != STATUS_RUNNING);
+            if (list.stream().noneMatch(r -> recordId.equals(r.recordId))) new ImageService(context, recordId).forget();
             writeBack(context, list);
         }
 
         public static synchronized void clearAll(Context context) {
-            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().clear().apply();
+            List<GenerationRecord> list = getAll(context);
+            list.removeIf(r -> {
+                if (r.status == STATUS_RUNNING) return false;
+                new ImageService(context, r.recordId).forget();
+                return true;
+            });
+            writeBack(context, list);
         }
 
         private static void writeBack(Context context, List<GenerationRecord> list) {
@@ -166,7 +174,7 @@ public final class GenerationRecord {
             for (GenerationRecord r : list) {
                 arr.put(r.toJson());
             }
-            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_RECORDS, arr.toString()).apply();
+            context.getSharedPreferences(PREF_NAME, Context.MODE_PRIVATE).edit().putString(KEY_RECORDS, arr.toString()).commit();
         }
     }
 }

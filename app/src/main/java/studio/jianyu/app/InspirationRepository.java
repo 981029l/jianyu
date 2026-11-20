@@ -44,6 +44,7 @@ final class InspirationRepository {
         final String id;
         final String title;
         volatile String prompt;
+        volatile boolean detailLoaded;
         final String thumbUrl;
         volatile String imageUrl;
         final String refUrl;
@@ -68,14 +69,14 @@ final class InspirationRepository {
              boolean nsfw, String author, int width, int height) {
             this.source = source;
             this.id = id;
-            this.title = title;
-            this.prompt = prompt == null ? "" : prompt;
+            this.title = isDiscover() ? ChinesePrompts.chineseBlocks(title) : title;
+            this.prompt = isDiscover() ? ChinesePrompts.chineseBlocks(prompt) : prompt == null ? "" : prompt;
             this.thumbUrl = thumbUrl;
             this.imageUrl = imageUrl == null ? "" : imageUrl;
             this.refUrl = refUrl == null ? "" : refUrl;
-            this.major = major;
-            this.rawMajor = rawMajor;
-            this.category = category == null ? "" : category;
+            this.major = isDiscover() ? "发现灵感" : major;
+            this.rawMajor = isDiscover() ? "发现灵感" : rawMajor;
+            this.category = isDiscover() ? "精选灵感" : category == null ? "" : category;
             this.model = model == null ? "" : model;
             this.ratio = ratio;
             this.nsfw = nsfw;
@@ -86,16 +87,23 @@ final class InspirationRepository {
 
         String uniqueKey() { return source + ":" + id; }
 
+        boolean isDiscover() { return "aiart".equals(source) || "opennana".equals(source); }
+
         boolean needsDetailFetch() {
-            return (prompt == null || prompt.isEmpty()) && ("aiart".equals(source) || "opennana".equals(source));
+            return isDiscover() && !detailLoaded;
         }
 
+        String displayTitle() { return title.isEmpty() ? "精选灵感" : title; }
+
+        String displayPrompt() { return prompt.isEmpty() && isDiscover() ? "这条灵感暂未提供中文提示词" : prompt; }
+
         synchronized void applyDetail(String fullPrompt, String fullImageUrl, String detailModel, String detailAuthor, String detailCategory) {
-            if (fullPrompt != null && !fullPrompt.isEmpty()) this.prompt = fullPrompt;
+            if (fullPrompt != null) this.prompt = fullPrompt;
+            detailLoaded = true;
             if (fullImageUrl != null && !fullImageUrl.isEmpty()) this.imageUrl = fullImageUrl;
             if (detailModel != null && !detailModel.isEmpty()) this.model = detailModel;
             if (detailAuthor != null && !detailAuthor.isEmpty()) this.author = detailAuthor;
-            if (detailCategory != null && !detailCategory.isEmpty()) this.category = detailCategory;
+            if (!isDiscover() && detailCategory != null && !detailCategory.isEmpty()) this.category = detailCategory;
         }
 
         float aspectHeightOverWidth() {
@@ -117,6 +125,7 @@ final class InspirationRepository {
                 o.put("id", id);
                 o.put("title", title);
                 o.put("prompt", prompt);
+                o.put("chineseDetail", isDiscover() && detailLoaded);
                 o.put("thumbUrl", thumbUrl);
                 o.put("imageUrl", imageUrl);
                 o.put("refUrl", refUrl);
@@ -135,7 +144,7 @@ final class InspirationRepository {
 
         static Item fromJson(JSONObject o) {
             if (o == null) return null;
-            return new Item(
+            Item item = new Item(
                     o.optString("source", "gallery"),
                     o.optString("id", ""),
                     o.optString("title", ""),
@@ -152,6 +161,11 @@ final class InspirationRepository {
                     o.optString("author", ""),
                     o.optInt("width", 1024),
                     o.optInt("height", 1024));
+            if (item.isDiscover() && o.optBoolean("chineseDetail", false)) {
+                item.prompt = o.optString("prompt", "");
+                item.detailLoaded = true;
+            }
+            return item;
         }
     }
 
@@ -323,15 +337,8 @@ final class InspirationRepository {
 
     // ==================== 发现灵感（aiart.pics + opennana.com 在线分页拉取） ====================
 
-    static PageResult fetchDiscoverPage(String providerFilter, String query, int page, int pageSize) throws IOException {
-        String p = providerFilter == null ? "all" : providerFilter.trim().toLowerCase(Locale.ROOT);
+    static PageResult fetchDiscoverPage(String query, int page, int pageSize) throws IOException {
         String q = query == null ? "" : query.trim();
-        if ("aiart".equals(p)) {
-            return fetchAiArtPage(q, page, pageSize);
-        }
-        if ("opennana".equals(p)) {
-            return fetchOpenNanaPage(q, page, pageSize);
-        }
         int half = Math.max(6, pageSize / 2);
         final PageResult[] results = new PageResult[2];
         final IOException[] errors = new IOException[2];
@@ -395,7 +402,6 @@ final class InspirationRepository {
                 JSONObject titleObj = obj.optJSONObject("title");
                 if (titleObj != null) {
                     title = optStr(titleObj, "zh");
-                    if (title.isEmpty()) title = optStr(titleObj, "en");
                 } else {
                     title = optStr(obj, "title");
                 }
@@ -425,12 +431,7 @@ final class InspirationRepository {
 
                 String rawModel = optStr(obj, "model");
                 String displayModel = normalizeDiscoverModel(rawModel);
-                String category = "AIART";
-                JSONArray tags = obj.optJSONArray("tags");
-                if (tags != null && tags.length() > 0) {
-                    String t0 = tags.optString(0, "").trim();
-                    if (!t0.isEmpty()) category = "AIART · " + t0;
-                }
+                String category = "精选灵感";
                 String author = "";
                 JSONObject authorObj = obj.optJSONObject("author");
                 if (authorObj != null) {
@@ -439,7 +440,7 @@ final class InspirationRepository {
                 }
                 String ratio = inferRatio(width, height);
                 out.add(new Item("aiart", id, title, "", thumbUrl, imageUrl,
-                        "AIART", "AIART", category, displayModel, ratio, false, author, width, height));
+                        "发现灵感", "发现灵感", category, displayModel, ratio, false, author, width, height));
             }
         }
         int total = root.optInt("total", 0);
@@ -474,7 +475,7 @@ final class InspirationRepository {
                 String imageUrl = deriveOpenNanaFullUrl(thumbUrl);
 
                 out.add(new Item("opennana", slug, title, "", thumbUrl, imageUrl,
-                        "OpenNana", "OpenNana", "OpenNana 精选", "GPT", "1:1", false, "", 1024, 1024));
+                        "发现灵感", "发现灵感", "精选灵感", "GPT", "1:1", false, "", 1024, 1024));
             }
         }
         JSONObject pag = data.optJSONObject("pagination");
@@ -485,59 +486,21 @@ final class InspirationRepository {
 
     static String fetchDiscoverDetail(Context context, Item item) throws IOException {
         if (item == null) return "";
-        if (!item.needsDetailFetch()) return item.prompt;
-        if ("aiart".equals(item.source)) {
-            String url = AIART_API_BASE + "/" + android.net.Uri.encode(item.id);
-            JSONObject root = getJson(url, "https://aiart.pics/");
+        synchronized (item) {
+            if (!item.needsDetailFetch()) return item.prompt;
+            boolean aiart = "aiart".equals(item.source);
+            String url = (aiart ? AIART_API_BASE : OPENNANA_API_BASE) + "/" + android.net.Uri.encode(item.id);
+            JSONObject root = getJson(url, aiart ? "https://aiart.pics/" : "https://opennana.com/");
             JSONObject data = root.optJSONObject("data");
-            if (data != null) {
-                JSONArray prompts = data.optJSONArray("prompts");
-                StringBuilder sb = new StringBuilder();
-                if (prompts != null) {
-                    for (int i = 0; i < prompts.length(); i++) {
-                        String line = prompts.optString(i, "").trim();
-                        if (!line.isEmpty()) {
-                            if (sb.length() > 0) sb.append("\n\n");
-                            sb.append(line);
-                        }
-                    }
-                }
-                String fullPrompt = sb.toString().trim();
-                if (fullPrompt.isEmpty()) fullPrompt = item.title;
-                item.applyDetail(fullPrompt, "", "", "", "");
-                if (context != null) updateFavoriteIfPresent(context, item);
-                return item.prompt;
-            }
-        } else if ("opennana".equals(item.source)) {
-            String url = OPENNANA_API_BASE + "/" + android.net.Uri.encode(item.id);
-            JSONObject root = getJson(url, "https://opennana.com/");
-            JSONObject data = root.optJSONObject("data");
-            if (data != null) {
-                JSONArray prompts = data.optJSONArray("prompts");
-                StringBuilder sb = new StringBuilder();
-                if (prompts != null) {
-                    for (int i = 0; i < prompts.length(); i++) {
-                        JSONObject pObj = prompts.optJSONObject(i);
-                        String text = pObj != null ? optStr(pObj, "text") : prompts.optString(i, "").trim();
-                        if (!text.isEmpty()) {
-                            if (sb.length() > 0) sb.append("\n\n");
-                            sb.append(text);
-                        }
-                    }
-                }
-                String fullPrompt = sb.toString().trim();
-                if (fullPrompt.isEmpty()) fullPrompt = item.title;
-                String fullImg = firstUrl(data.optJSONArray("images"));
-                String rawModel = optStr(data, "model");
-                String displayModel = normalizeDiscoverModel(rawModel);
-                String author = optStr(data, "source_name");
-                String cat = rawModel.isEmpty() ? "OpenNana 精选" : ("OpenNana · " + rawModel);
-                item.applyDetail(fullPrompt, fullImg, displayModel, author, cat);
-                if (context != null) updateFavoriteIfPresent(context, item);
-                return item.prompt;
-            }
+            if (data == null) throw new IOException("暂时无法获取中文提示词，请稍后重试。");
+            String fullPrompt = ChinesePrompts.select(data.optJSONArray("prompts"));
+            String fullImage = aiart ? "" : firstUrl(data.optJSONArray("images"));
+            String model = normalizeDiscoverModel(optStr(data, "model"));
+            String author = aiart ? "" : optStr(data, "source_name");
+            item.applyDetail(fullPrompt, fullImage, model, author, "精选灵感");
+            if (context != null) updateFavoriteIfPresent(context, item);
+            return item.prompt;
         }
-        return item.prompt;
     }
 
     private static JSONObject getJson(String url, String referer) throws IOException {

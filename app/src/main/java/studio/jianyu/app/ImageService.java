@@ -32,6 +32,8 @@ import javax.net.ssl.HttpsURLConnection;
 
 final class ImageService {
     static final int IMAGE_LIMIT = 24 * 1024 * 1024;
+    static final String PENDING_PREFS = "pending-image";
+    private static final Object KEY_LOCK = new Object();
     private static final int REFERENCE_LIMIT = 4 * 1024 * 1024;
     private static final int JSON_LIMIT = 1024 * 1024;
     private static final int MAX_DETAIL = 300;
@@ -47,15 +49,19 @@ final class ImageService {
     private volatile HttpsURLConnection activeConn;
 
     ImageService(Context context) {
+        this(context, "");
+    }
+
+    ImageService(Context context, String recordId) {
         this.context = context.getApplicationContext();
-        pending = this.context.getSharedPreferences("pending-image", Context.MODE_PRIVATE);
+        String name = PENDING_PREFS + (recordId.isEmpty() ? "" : "-" + recordId);
+        pending = this.context.getSharedPreferences(name, Context.MODE_PRIVATE);
         config = this.context.getSharedPreferences("config", Context.MODE_PRIVATE);
     }
 
     boolean hasPending() { return pending.contains("task") || pending.contains("url"); }
     void forget() { pending.edit().clear().commit(); }
 
-    void resetCancel() { cancelled = false; }
     boolean isCancelled() { return cancelled; }
     void cancelActive() {
         cancelled = true;
@@ -100,13 +106,14 @@ final class ImageService {
         return parseKeys(BuildConfig.IMAGE_API_KEYS_V2);
     }
 
-    private synchronized String nextKey(List<String> keys, String cursorKey) {
-        if (keys.isEmpty()) return "";
-        int cursor = config.getInt(cursorKey, 0);
-        if (cursor < 0) cursor = 0;
-        String key = keys.get(cursor % keys.size());
-        config.edit().putInt(cursorKey, (cursor + 1) % keys.size()).commit();
-        return key;
+    private String nextKey(List<String> keys, String cursorKey) {
+        synchronized (KEY_LOCK) {
+            if (keys.isEmpty()) return "";
+            int cursor = Math.max(0, config.getInt(cursorKey, 0));
+            String key = keys.get(cursor % keys.size());
+            config.edit().putInt(cursorKey, (cursor + 1) % keys.size()).commit();
+            return key;
+        }
     }
 
     private static HttpsURLConnection open(URL url, int timeout) throws IOException {
@@ -346,7 +353,7 @@ final class ImageService {
     }
 
     String run(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
-        resetCancel();
+        if (cancelled) throw new IOException("已取消本次等待。");
         if (!isDirectMode()) return runGateway(prompt, model, ratio, reference, nsfw);
         return runDirect(prompt, model, ratio, reference, nsfw);
     }

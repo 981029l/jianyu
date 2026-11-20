@@ -167,7 +167,7 @@ final class GalleryAdapters {
                 h.galleryScrim.setVisibility(View.VISIBLE);
                 h.topBadge.setVisibility(item.ratio.isEmpty() ? View.GONE : View.VISIBLE);
                 h.topBadge.setText(item.ratio);
-                h.galleryTitle.setText(item.title.isEmpty() ? item.prompt : item.title);
+                h.galleryTitle.setText(item.isDiscover() ? item.displayTitle() : item.title.isEmpty() ? item.prompt : item.title);
                 String cat = !item.category.isEmpty() ? item.category : item.major;
                 h.gallerySub.setVisibility(cat.isEmpty() ? View.GONE : View.VISIBLE);
                 h.gallerySub.setText(cat);
@@ -726,7 +726,8 @@ final class GalleryAdapters {
                     secondaryActionIcon.setImageResource(R.drawable.ic_wand);
                     secondaryActionBtn.setOnClickListener(v -> listener.onRetry(r));
                 } else {
-                    primaryActionLabel.setText("一键重试");
+                    primaryActionLabel.setText(r.status == GenerationRecord.STATUS_RUNNING ? "查看进度"
+                            : GenerationTasks.canResume(ctx, r.recordId) ? "继续获取" : "重新创作");
                     primaryActionIcon.setImageResource(R.drawable.ic_refresh);
                     primaryActionBtn.setOnClickListener(v -> listener.onRetry(r));
 
@@ -735,6 +736,8 @@ final class GalleryAdapters {
                     secondaryActionBtn.setOnClickListener(v -> listener.onUsePrompt(r.prompt));
                 }
 
+                deleteBtn.setEnabled(r.status != GenerationRecord.STATUS_RUNNING);
+                deleteBtn.setAlpha(r.status == GenerationRecord.STATUS_RUNNING ? 0.35f : 1f);
                 deleteBtn.setOnClickListener(v -> listener.onDeleteRecord(r.recordId));
                 card.setOnClickListener(v -> {
                     if (r.status == GenerationRecord.STATUS_SUCCESS && !r.resultImageId.isEmpty()) {

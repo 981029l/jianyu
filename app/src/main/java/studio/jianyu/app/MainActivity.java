@@ -102,7 +102,6 @@ public final class MainActivity extends Activity {
     private GalleryAdapters.InspirationAdapter promptAdapter;
     private String promptMajor = "全部";
     private String promptQuery = "";
-    private String discoverProvider = "all"; // all: 双源聚合, aiart: AIART.PICS, opennana: OpenNana
     private int promptVisibleCount = GALLERY_PAGE_SIZE;
     private String builtPromptMajorsSignature = "";
 
@@ -132,10 +131,14 @@ public final class MainActivity extends Activity {
     private TextView loadingTimerView;
     private final Runnable genTimerTick = new Runnable() {
         @Override public void run() {
-            if (!busy) return;
-            long sec = Math.max(1L, (System.currentTimeMillis() - genStartMillis) / 1000L);
-            if (miniGenText != null) miniGenText.setText("正在绘制 · " + sec + "s");
-            if (loadingTimerView != null) loadingTimerView.setText("已等待 " + sec + " 秒 · 离开此页也会自动存入作品库");
+            int count = GenerationTasks.count();
+            if (count == 0) return;
+            if (miniGenText != null) miniGenText.setText(count + " 条任务生成中 · 查看进度");
+            GenerationTasks.Task task = GenerationTasks.get(loadingRecordId);
+            if (loadingTimerView != null && task != null) {
+                long sec = Math.max(1L, (System.currentTimeMillis() - task.startedAt) / 1000L);
+                loadingTimerView.setText("已等待 " + sec + " 秒 · 完成后自动存入作品库");
+            }
             uiHandler.postDelayed(this, 1000L);
         }
     };
@@ -159,13 +162,7 @@ public final class MainActivity extends Activity {
     private ImageService service;
     private SharedPreferences prefs;
 
-    // 跨配置/前后台共享的静态任务状态
-    private static boolean busy = false;
-    private static long activeGenSeq = 0L;
-    private static long genStartMillis = 0L;
-    private static String activePrompt = "", activeModel = "", activeRatio = "";
-    private static boolean activeHasRef = false;
-    private static String activeRecordId = "";
+    private String loadingRecordId = "";
     private static boolean checkingUpdate = false;
     private static boolean autoCheckedUpdate = false;
     private static UpdateManager.UpdateInfo availableUpdate = null;
@@ -182,7 +179,7 @@ public final class MainActivity extends Activity {
     private static boolean discoverHasMore = true;
     private static boolean discoverLoading = false;
     private static String discoverError = "";
-    private static String discoverFetchedKey = "";
+    private static String discoverFetchedKey = null;
 
     private static InspirationRepository.GalleryData galleryData = null;
     private static boolean galleryLoading = false;
@@ -192,6 +189,7 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         service = new ImageService(this);
+        GenerationTasks.restore(this);
         prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         safeBrowse = prefs.getBoolean(KEY_SAFE_BROWSE, true);
 
@@ -220,7 +218,6 @@ public final class MainActivity extends Activity {
             promptSourceIndex = state.getInt("promptSourceIndex", 0);
             promptMajor = state.getString("promptMajor", "全部");
             promptQuery = state.getString("promptQuery", "");
-            discoverProvider = state.getString("discoverProvider", "all");
             promptVisibleCount = state.getInt("promptVisibleCount", GALLERY_PAGE_SIZE);
             if (state.containsKey("reference")) reference = Uri.parse(state.getString("reference"));
         }
@@ -231,7 +228,7 @@ public final class MainActivity extends Activity {
         refreshHomeDynamic();
         refreshLibraryContent();
 
-        if (busy) startGenTimer();
+        if (GenerationTasks.count() > 0) startGenTimer();
 
         if (state == null) {
             playLaunchAnimation();
@@ -255,10 +252,11 @@ public final class MainActivity extends Activity {
     @Override protected void onStart() {
         super.onStart();
         visible = this;
+        if (isOverlayOpen("loading") && GenerationTasks.get(loadingRecordId) == null) popOverlaysByTag("loading");
         refreshHomeDynamic();
         refreshLibraryContent();
         updateFloatingBarsVisibility();
-        if (busy) startGenTimer();
+        if (GenerationTasks.count() > 0) startGenTimer();
     }
 
     @Override protected void onStop() {
@@ -282,7 +280,6 @@ public final class MainActivity extends Activity {
         state.putInt("promptSourceIndex", promptSourceIndex);
         state.putString("promptMajor", promptMajor);
         state.putString("promptQuery", promptQuery);
-        state.putString("discoverProvider", discoverProvider);
         state.putInt("promptVisibleCount", promptVisibleCount);
         if (reference != null) state.putString("reference", reference.toString());
         state.putString("current", current);
@@ -602,7 +599,7 @@ public final class MainActivity extends Activity {
 
         boolean loadingOnTop = isOverlayOpen("loading");
         boolean zoomOnTop = isOverlayOpen("zoom");
-        boolean showMini = busy && !imeVisible && !loadingOnTop && !zoomOnTop;
+        boolean showMini = GenerationTasks.count() > 0 && !imeVisible && !loadingOnTop && !zoomOnTop;
         MotionKit.animateFloatingBar(miniGenBar, showMini, 60);
         if (showMini) {
             FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) miniGenBar.getLayoutParams();
@@ -825,8 +822,7 @@ public final class MainActivity extends Activity {
         UiKit.applySoftShadow(ctaBtn, this, 10, 0x662F5CE0);
         ctaBtn.setFocusable(true);
         ctaBtn.setOnClickListener(v -> {
-            if (busy) openLoadingOverlay();
-            else generate();
+            generate();
         });
         ctaIconView = UiKit.icon(this, R.drawable.ic_sparkles, 17, Color.WHITE);
         LinearLayout.LayoutParams cilp = new LinearLayout.LayoutParams(dp(17), dp(17));
@@ -887,42 +883,15 @@ public final class MainActivity extends Activity {
         if (promptRefBtnLabel != null) {
             promptRefBtnLabel.setText(reference == null ? "参考图" : "换参考图");
         }
-        // 待取回任务条
         if (homePendingSlot != null) {
             homePendingSlot.removeAllViews();
-            if (service.hasPending() && !busy) {
-                LinearLayout banner = new LinearLayout(this);
-                banner.setOrientation(LinearLayout.HORIZONTAL);
-                banner.setGravity(Gravity.CENTER_VERTICAL);
-                banner.setBackground(UiKit.card(this, 0xF0EAF0FF, 0xFFC8DAFF, 18));
-                banner.setPadding(dp(12), dp(9), dp(10), dp(9));
-                banner.addView(UiKit.icon(this, R.drawable.ic_clock, 16, UiKit.BLUE));
-
-                TextView msg = UiKit.text(this, "上次作品仍在生成中", 12.5f, UiKit.INK, true);
-                LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(0, -2, 1);
-                mlp.leftMargin = dp(8);
-                banner.addView(msg, mlp);
-
-                TextView resume = UiKit.text(this, "继续获取", 12, Color.WHITE, true);
-                resume.setBackground(UiKit.round(this, UiKit.BLUE, 13));
-                resume.setPadding(dp(11), dp(6), dp(11), dp(6));
-                resume.setOnClickListener(v -> generate());
-                banner.addView(resume);
-
-                LinearLayout drop = new LinearLayout(this);
-                drop.setGravity(Gravity.CENTER);
-                drop.setPadding(dp(8), dp(6), dp(4), dp(6));
-                drop.addView(UiKit.icon(this, R.drawable.ic_close, 15, UiKit.MUTED));
-                drop.setOnClickListener(v -> new AlertDialog.Builder(this)
-                        .setMessage("移除本机的取图记录？这不会取消服务端任务。")
-                        .setNegativeButton("返回", null)
-                        .setPositiveButton("移除", (d, w) -> { service.forget(); refreshHomeDynamic(); })
-                        .show());
-                banner.addView(drop);
-
-                LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
-                blp.topMargin = dp(12);
-                homePendingSlot.addView(banner, blp);
+            int pendingCount = GenerationTasks.pendingCount(this);
+            if (pendingCount > 0) {
+                LinearLayout banner = UiKit.glassButton(this, R.drawable.ic_clock,
+                        pendingCount + " 条任务可继续获取 · 查看记录", UiKit.BLUE_SOFT, UiKit.BLUE, this::showGenerationRecords);
+                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, dp(44));
+                lp.topMargin = dp(12);
+                homePendingSlot.addView(banner, lp);
             }
         }
         // 参考图贴纸条
@@ -975,10 +944,8 @@ public final class MainActivity extends Activity {
         }
         // 主按钮状态
         if (ctaLabelView != null && ctaIconView != null) {
-            boolean pending = service.hasPending();
             ctaIconView.setImageResource(reference == null ? R.drawable.ic_sparkles : R.drawable.ic_wand);
-            ctaLabelView.setText(busy ? "正在绘制中 · 查看进度"
-                    : pending ? "继续获取上次作品"
+            ctaLabelView.setText(GenerationTasks.count() > 0 ? "生成新的独立任务"
                     : reference == null ? "生成图片" : "按描述修改参考图");
         }
         // 最近作品条
@@ -1421,7 +1388,7 @@ public final class MainActivity extends Activity {
         headerPad.setOrientation(LinearLayout.VERTICAL);
         headerPad.setPadding(dp(18), dp(14), dp(18), dp(8));
 
-        headerPad.addView(UiKit.pageTitleHeader(this, "提示词工坊", "本地 8,363 精品 · 发现 32,000+ 在线灵感", null));
+        headerPad.addView(UiKit.pageTitleHeader(this, "提示词工坊", "离线提示词库 · 在线精选灵感", null));
 
         // 来源分段切换条：[ 全部 | 热榜图鉴 | 设计精选 | 经典画廊 | 发现灵感 ]
         promptSourceSegHolder = new LinearLayout(this);
@@ -1613,13 +1580,13 @@ public final class MainActivity extends Activity {
 
         if (promptSourceIndex == 4) {
             rebuildDiscoverChips();
-            String targetKey = discoverProvider + "|" + promptQuery;
+            String targetKey = promptQuery;
             if (!targetKey.equals(discoverFetchedKey) && !discoverLoading) {
                 fetchDiscover(true);
                 return;
             }
             if (discoverLoading && discoverItems.isEmpty()) {
-                promptCountLabel.setText("正在连接 AIART.PICS 与 OpenNana 在线库…");
+                promptCountLabel.setText("正在加载精选灵感…");
                 promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
                 showStateIn(promptStateBox, loadingHintCard("正在按需拉取在线发现灵感…"));
                 return;
@@ -1630,16 +1597,13 @@ public final class MainActivity extends Activity {
                 showStateIn(promptStateBox, emptyCard("在线拉取失败", discoverError, "重试拉取", () -> fetchDiscover(true)));
                 return;
             }
-            String providerLabel = "aiart".equals(discoverProvider) ? "AIART.PICS (13,467)"
-                    : ("opennana".equals(discoverProvider) ? "OpenNana (18,727)" : "AIART + OpenNana 双源 (32,194)");
-            promptCountLabel.setText(providerLabel + " · 已加载 " + discoverItems.size() + " 条"
-                    + (promptQuery.isEmpty() ? " · 按需分页" : " · 检索: " + promptQuery));
+            promptCountLabel.setText("发现灵感 · 已加载 " + discoverItems.size() + " 条"
+                    + (promptQuery.isEmpty() ? "" : " · 检索：" + promptQuery));
             if (discoverItems.isEmpty()) {
                 promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
-                showStateIn(promptStateBox, emptyCard("没有找到匹配的在线灵感", "试试换个关键词或切换来源标签。", "重置筛选", () -> {
+                showStateIn(promptStateBox, emptyCard("没有找到匹配的在线灵感", "试试换个中文关键词。", "重置筛选", () -> {
                     promptQuery = "";
                     if (promptSearchInput != null) promptSearchInput.setText("");
-                    discoverProvider = "all";
                     builtPromptMajorsSignature = "";
                     fetchDiscover(true);
                 }));
@@ -1692,30 +1656,10 @@ public final class MainActivity extends Activity {
 
     private void rebuildDiscoverChips() {
         if (promptMajorsRow == null) return;
-        String sig = "discover|" + discoverProvider + "|" + promptQuery;
+        String sig = "discover|" + promptQuery;
         if (sig.equals(builtPromptMajorsSignature)) return;
         builtPromptMajorsSignature = sig;
         promptMajorsRow.removeAllViews();
-
-        String[][] providers = {
-                {"all", "双源聚合"},
-                {"aiart", "AIART.PICS"},
-                {"opennana", "OpenNana"}
-        };
-        for (int i = 0; i < providers.length; i++) {
-            final String pKey = providers[i][0];
-            final String pName = providers[i][1];
-            TextView chip = UiKit.chip(this, pName, pKey.equals(discoverProvider), () -> {
-                if (!pKey.equals(discoverProvider)) {
-                    discoverProvider = pKey;
-                    builtPromptMajorsSignature = "";
-                    fetchDiscover(true);
-                }
-            });
-            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(-2, -2);
-            if (i > 0) clp.leftMargin = dp(7);
-            promptMajorsRow.addView(chip, clp);
-        }
 
         String[] topics = {"摄影", "人像", "海报", "3D", "插画", "动漫", "国风"};
         for (String topic : topics) {
@@ -1739,9 +1683,8 @@ public final class MainActivity extends Activity {
         if (discoverLoading) return;
         discoverLoading = true;
         discoverError = "";
-        final String providerSnap = discoverProvider;
         final String querySnap = promptQuery;
-        final String keySnap = providerSnap + "|" + querySnap;
+        final String keySnap = querySnap;
         final int nextPage = reset ? 1 : discoverPage + 1;
         if (reset) {
             discoverItems.clear();
@@ -1756,7 +1699,7 @@ public final class MainActivity extends Activity {
         new Thread(() -> {
             try {
                 InspirationRepository.PageResult result = InspirationRepository.fetchDiscoverPage(
-                        providerSnap, querySnap, nextPage, GALLERY_PAGE_SIZE);
+                        querySnap, nextPage, GALLERY_PAGE_SIZE);
                 uiHandler.post(() -> {
                     discoverLoading = false;
                     discoverPage = nextPage;
@@ -2116,6 +2059,10 @@ public final class MainActivity extends Activity {
                 copyPrompt(prompt);
             }
             @Override public void onDeleteRecord(String recordId) {
+                if (GenerationTasks.get(recordId) != null) {
+                    Toast.makeText(MainActivity.this, "请先取消这条任务的等待，再删除记录", Toast.LENGTH_SHORT).show();
+                    return;
+                }
                 GenerationRecord.Repository.deleteRecord(MainActivity.this, recordId);
                 refreshLibraryContent();
             }
@@ -2282,14 +2229,27 @@ public final class MainActivity extends Activity {
 
     private void retryRecord(GenerationRecord record) {
         if (record == null) return;
+        if (GenerationTasks.get(record.recordId) != null) {
+            openLoadingOverlay(record.recordId);
+            return;
+        }
+        if (GenerationTasks.canResume(this, record.recordId)) {
+            GenerationTasks.start(this, record, MainActivity::finished);
+            startGenTimer();
+            refreshHomeDynamic();
+            refreshLibraryContent();
+            openLoadingOverlay(record.recordId);
+            return;
+        }
+        nsfw = record.nsfw;
         selectedRoute = Math.max(0, Math.min(1, record.route));
         if (selectedRoute == 0) {
             if ("image-2".equals(record.wireModel) || "Grok".equalsIgnoreCase(record.model)) modelLine1 = 1;
             else modelLine1 = 0;
         } else {
-            if ("gpt-2.5-flare".equals(record.wireModel)) modelLine2 = 1;
-            else if ("gpt-2.5-sunburst".equals(record.wireModel)) modelLine2 = 2;
-            else if ("gpt-2".equals(record.wireModel)) modelLine2 = 3;
+            if (("gpt-image-2.5-flare".equals(record.wireModel) || "gpt-2.5-flare".equals(record.wireModel))) modelLine2 = 1;
+            else if (("gpt-image-2.5-sunburst".equals(record.wireModel) || "gpt-2.5-sunburst".equals(record.wireModel))) modelLine2 = 2;
+            else if (("gpt-image-2".equals(record.wireModel) || "gpt-2".equals(record.wireModel))) modelLine2 = 3;
             else modelLine2 = 0;
         }
         setRatioByName(record.ratio);
@@ -2332,12 +2292,12 @@ public final class MainActivity extends Activity {
     private void confirmClearRecords() {
         new AlertDialog.Builder(this)
                 .setTitle("清空生成记录")
-                .setMessage("确定清空全部生成记录吗？这不会影响已经保存在本地作品库的成品图。")
+                .setMessage("清空已结束的生成记录及其待取图信息？正在生成的任务和本地成品图会保留。")
                 .setNegativeButton("取消", null)
                 .setPositiveButton("清空", (d, w) -> {
                     GenerationRecord.Repository.clearAll(this);
                     refreshLibraryContent();
-                    Toast.makeText(this, "生成记录已清空", Toast.LENGTH_SHORT).show();
+                    Toast.makeText(this, "已清空结束的记录，正在生成的任务已保留", Toast.LENGTH_SHORT).show();
                 }).show();
     }
 
@@ -2383,8 +2343,29 @@ public final class MainActivity extends Activity {
 
     // ==================== 二级页面 1：生成中动态光球（可最小化 + 可主动取消等待） ====================
 
+    private void showGenerationRecords() {
+        popOverlaysByTag("loading");
+        librarySubTab = 1;
+        switchTab(3);
+        refreshLibraryContent();
+    }
+
     private void openLoadingOverlay() {
-        if (isOverlayOpen("loading")) return;
+        if (GenerationTasks.count() != 1) {
+            showGenerationRecords();
+            return;
+        }
+        GenerationTasks.Task task = GenerationTasks.first();
+        if (task != null) openLoadingOverlay(task.record.recordId);
+    }
+
+    private void openLoadingOverlay(String recordId) {
+        GenerationTasks.Task task = GenerationTasks.get(recordId);
+        if (task == null) { showGenerationRecords(); return; }
+        if (isOverlayOpen("loading") && recordId.equals(loadingRecordId)) return;
+        popOverlaysByTag("loading");
+        loadingRecordId = recordId;
+        GenerationRecord record = task.record;
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setVerticalScrollBarEnabled(false);
@@ -2400,7 +2381,7 @@ public final class MainActivity extends Activity {
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         topBar.addView(UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::popOverlay),
                 new LinearLayout.LayoutParams(dp(44), dp(44)));
-        TextView title = UiKit.text(this, service.hasPending() ? "正在获取作品" : "正在创作", 16.5f, UiKit.INK, true);
+        TextView title = UiKit.text(this, task.service.hasPending() ? "正在获取作品" : "正在创作", 16.5f, UiKit.INK, true);
         title.setGravity(Gravity.CENTER);
         topBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         topBar.addView(new View(this), new LinearLayout.LayoutParams(dp(44), dp(1)));
@@ -2417,7 +2398,7 @@ public final class MainActivity extends Activity {
         slp.topMargin = dp(4);
         orbHolder.addView(status, slp);
 
-        long sec = Math.max(1L, (System.currentTimeMillis() - genStartMillis) / 1000L);
+        long sec = Math.max(1L, (System.currentTimeMillis() - task.startedAt) / 1000L);
         loadingTimerView = UiKit.text(this, "已等待 " + sec + " 秒 · 离开此页也会自动存入作品库", 13, UiKit.MUTED, false);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
         tlp.topMargin = dp(6);
@@ -2427,7 +2408,7 @@ public final class MainActivity extends Activity {
         ohlp.topMargin = dp(12);
         page.addView(orbHolder, ohlp);
 
-        String summaryPrompt = !activePrompt.isEmpty() ? activePrompt : draft.trim();
+        String summaryPrompt = record.prompt;
         if (!summaryPrompt.isEmpty()) {
             LinearLayout card = new LinearLayout(this);
             card.setOrientation(LinearLayout.VERTICAL);
@@ -2448,14 +2429,14 @@ public final class MainActivity extends Activity {
             tags.setOrientation(LinearLayout.HORIZONTAL);
             LinearLayout.LayoutParams tagLp = new LinearLayout.LayoutParams(-2, -2);
             tagLp.topMargin = dp(10);
-            String m = !activeModel.isEmpty() ? activeModel : activeModelDisplayName();
-            String r = !activeRatio.isEmpty() ? activeRatio : ratios[ratio];
+            String m = record.model;
+            String r = record.ratio;
             tags.addView(UiKit.softBadge(this, m, UiKit.BLUE_SOFT, UiKit.BLUE));
             TextView rBadge = UiKit.softBadge(this, r, UiKit.SOFT, UiKit.MUTED);
             LinearLayout.LayoutParams rbp = new LinearLayout.LayoutParams(-2, -2);
             rbp.leftMargin = dp(6);
             tags.addView(rBadge, rbp);
-            if (activeHasRef) {
+            if (record.hasRef) {
                 TextView refBadge = UiKit.softBadge(this, "图改图", UiKit.SOFT, UiKit.MUTED);
                 LinearLayout.LayoutParams fbp = new LinearLayout.LayoutParams(-2, -2);
                 fbp.leftMargin = dp(6);
@@ -2470,9 +2451,10 @@ public final class MainActivity extends Activity {
 
         LinearLayout actionRow = new LinearLayout(this);
         actionRow.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout bgBtn = UiKit.glassButton(this, R.drawable.ic_compass, "后台继续", UiKit.GLASS_STRONG, UiKit.BLUE, () -> {
+        LinearLayout bgBtn = UiKit.glassButton(this, R.drawable.ic_compass, "继续创作", UiKit.GLASS_STRONG, UiKit.BLUE, () -> {
             popOverlay();
-            Toast.makeText(this, "已切到后台继续生成，可随时点底部胶囊查看", Toast.LENGTH_SHORT).show();
+            switchTab(0);
+            Toast.makeText(this, "这条任务继续生成，可以输入另一条提示词", Toast.LENGTH_SHORT).show();
         });
         LinearLayout.LayoutParams lp1 = new LinearLayout.LayoutParams(0, dp(48), 1);
         lp1.rightMargin = dp(6);
@@ -2481,14 +2463,10 @@ public final class MainActivity extends Activity {
         LinearLayout cancelBtn = UiKit.glassButton(this, R.drawable.ic_close, "取消等待", 0xF0FFF0F0, UiKit.DANGER, () ->
                 new AlertDialog.Builder(this)
                         .setTitle("取消本次等待")
-                        .setMessage("中断当前连接并返回创作页？若服务端已生成完成，稍后仍可点击“继续获取”。")
+                        .setMessage("仅中断这条任务的等待，其他任务继续生成。有任务编号时可在生成记录中继续获取。")
                         .setNegativeButton("继续等待", null)
                         .setPositiveButton("中断等待", (d, w) -> {
-                            activeGenSeq++;
-                            service.cancelActive();
-                            busy = false;
-                            uiHandler.removeCallbacks(genTimerTick);
-                            GenerationRecord.Repository.updateStatus(this, activeRecordId, GenerationRecord.STATUS_CANCELLED, null, "用户已中断等待", Math.max(0, System.currentTimeMillis() - genStartMillis));
+                            GenerationTasks.cancel(recordId);
                             popOverlaysByTag("loading");
                             refreshHomeDynamic();
                             refreshLibraryContent();
@@ -2749,7 +2727,7 @@ public final class MainActivity extends Activity {
         LinearLayout metaRow = new LinearLayout(this);
         metaRow.setOrientation(LinearLayout.HORIZONTAL);
         metaRow.setGravity(Gravity.CENTER_VERTICAL);
-        String heading = !item.title.isEmpty() ? item.title : "创意广场灵感";
+        String heading = item.isDiscover() ? item.displayTitle() : !item.title.isEmpty() ? item.title : "创意广场灵感";
         metaRow.addView(UiKit.text(this, heading, 17.5f, UiKit.INK, true), new LinearLayout.LayoutParams(0, -2, 1));
         TextView rightMetaView = UiKit.text(this, buildInspireRightMeta(item), 12, UiKit.MUTED, false);
         metaRow.addView(rightMetaView);
@@ -2770,7 +2748,7 @@ public final class MainActivity extends Activity {
         head.addView(UiKit.pillTagButton(this, R.drawable.ic_copy, "复制", UiKit.BLUE_SOFT, UiKit.BLUE, () -> copyInspirationPrompt(item)));
         pCard.addView(head);
 
-        String initialPrompt = item.needsDetailFetch() ? "正在按需拉取完整提示词…" : item.prompt;
+        String initialPrompt = item.needsDetailFetch() ? "正在获取中文提示词…" : item.displayPrompt();
         TextView promptBodyView = UiKit.text(this, initialPrompt, 13.5f, UiKit.INK, false);
         promptBodyView.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams pblp0 = new LinearLayout.LayoutParams(-1, -2);
@@ -2787,14 +2765,14 @@ public final class MainActivity extends Activity {
                 try {
                     String loaded = InspirationRepository.fetchDiscoverDetail(appCtx, item);
                     uiHandler.post(() -> {
-                        promptBodyView.setText((loaded == null || loaded.isEmpty()) ? item.title : loaded);
+                        promptBodyView.setText(item.displayPrompt());
                         rightMetaView.setText(buildInspireRightMeta(item));
                         String updatedCorner = !item.model.isEmpty() ? item.model + " · " + item.ratio
                                 : (!item.major.isEmpty() ? item.major + " · " + item.ratio : item.ratio);
                         cornerTag.setText(updatedCorner);
                     });
                 } catch (Exception e) {
-                    uiHandler.post(() -> promptBodyView.setText(item.prompt.isEmpty() ? item.title : item.prompt));
+                    uiHandler.post(() -> promptBodyView.setText("中文提示词加载失败，请重新打开重试"));
                 }
             }, "jianyu-inspire-detail").start();
         }
@@ -2908,6 +2886,7 @@ public final class MainActivity extends Activity {
 
     private static String buildInspireRightMeta(InspirationRepository.Item item) {
         StringBuilder rightMeta = new StringBuilder();
+        if (item.isDiscover()) return "精选灵感 · " + item.ratio;
         if (!item.author.isEmpty()) rightMeta.append("by ").append(item.author);
         else if (!item.category.isEmpty()) rightMeta.append(item.category);
         if (item.width > 0 && item.height > 0) {
@@ -2920,19 +2899,27 @@ public final class MainActivity extends Activity {
     private void copyInspirationPrompt(InspirationRepository.Item item) {
         if (item == null) return;
         if (!item.needsDetailFetch()) {
-            copyText(item.prompt);
+            copyLoadedInspiration(item);
             return;
         }
-        Toast.makeText(this, "正在拉取完整提示词…", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "正在获取中文提示词…", Toast.LENGTH_SHORT).show();
         Context appCtx = getApplicationContext();
         new Thread(() -> {
             try {
                 String loaded = InspirationRepository.fetchDiscoverDetail(appCtx, item);
-                uiHandler.post(() -> copyText((loaded == null || loaded.isEmpty()) ? item.title : loaded));
+                uiHandler.post(() -> copyLoadedInspiration(item));
             } catch (Exception e) {
-                uiHandler.post(() -> copyText(item.prompt.isEmpty() ? item.title : item.prompt));
+                uiHandler.post(() -> Toast.makeText(this, "中文提示词加载失败，请重试", Toast.LENGTH_SHORT).show());
             }
         }, "jianyu-copy-detail").start();
+    }
+
+    private void copyLoadedInspiration(InspirationRepository.Item item) {
+        if (item.prompt.isEmpty()) {
+            Toast.makeText(this, item.displayPrompt(), Toast.LENGTH_SHORT).show();
+            return;
+        }
+        copyText(item.prompt);
     }
 
     private void saveRemoteImage(InspirationRepository.Item item) {
@@ -3018,6 +3005,10 @@ public final class MainActivity extends Activity {
     }
 
     private void applyInspirationToHomeImmediate(InspirationRepository.Item item) {
+        if (item.isDiscover() && item.prompt.isEmpty()) {
+            Toast.makeText(this, item.displayPrompt(), Toast.LENGTH_SHORT).show();
+            return;
+        }
         draft = (item.prompt == null || item.prompt.isEmpty()) ? item.title : item.prompt;
         if (item.model != null && !item.model.isEmpty()) {
             setModelByName(item.model);
@@ -3302,63 +3293,35 @@ public final class MainActivity extends Activity {
     }
 
     private void generate() {
-        if (busy) {
-            openLoadingOverlay();
-            return;
-        }
-        if (!service.isLineConfigured(activeWireModelName())) {
+        String wireModel = activeWireModelName();
+        if (!service.isLineConfigured(wireModel)) {
             String lineName = selectedRoute == 0 ? "线路 1" : "线路 2";
-            new AlertDialog.Builder(this)
-                    .setTitle(lineName + " 尚未配置密钥")
-                    .setMessage("当前" + lineName + "尚未配置生图密钥。您可以切换至另一条线路体验，或在环境配置中添加密钥。")
-                    .setPositiveButton("我知道了", null)
-                    .show();
+            new AlertDialog.Builder(this).setTitle(lineName + " 尚未配置密钥")
+                    .setMessage("当前" + lineName + "尚未配置生图密钥，可以切换另一条线路。")
+                    .setPositiveButton("我知道了", null).show();
             return;
         }
         if (promptInput != null) draft = promptInput.getText().toString();
         String input = draft.trim();
-        if (!service.hasPending() && (input.isEmpty() || input.codePointCount(0, input.length()) > 4000)) {
+        if (input.isEmpty() || input.codePointCount(0, input.length()) > 4000) {
             if (promptInput != null) {
                 promptInput.setError("请输入 1 至 4000 个字符的画面描述");
                 if (heroCardView != null) MotionKit.shake(heroCardView);
             }
             return;
         }
-        activePrompt = input;
-        activeModel = activeModelDisplayName();
-        activeRatio = ratios[ratio];
-        activeHasRef = reference != null;
-        String wireModel = activeWireModelName();
-        final long seq = ++activeGenSeq;
-        busy = true;
-        genStartMillis = System.currentTimeMillis();
+        GenerationRecord record = new GenerationRecord(UUID.randomUUID().toString(), System.currentTimeMillis(),
+                selectedRoute, routes[selectedRoute], activeModelDisplayName(), wireModel, ratios[ratio], input,
+                reference != null, reference != null ? reference.toString() : "", isGrok() && nsfw,
+                GenerationRecord.STATUS_RUNNING, "", "", 0L);
+        GenerationTasks.start(this, record, MainActivity::finished);
+        draft = "";
+        if (promptInput != null) promptInput.setText("");
         startGenTimer();
-
-        // 记录生成历史任务（运行中）
-        final String recordId = String.valueOf(genStartMillis);
-        activeRecordId = recordId;
-        GenerationRecord record = new GenerationRecord(
-                recordId,
-                genStartMillis,
-                selectedRoute,
-                selectedRoute == 0 ? "线路 1" : "线路 2",
-                activeModel,
-                wireModel,
-                activeRatio,
-                input,
-                activeHasRef,
-                reference != null ? reference.toString() : "",
-                isGrok() && nsfw,
-                GenerationRecord.STATUS_RUNNING,
-                "",
-                "",
-                0L
-        );
-        GenerationRecord.Repository.saveRecord(this, record);
-
         refreshHomeDynamic();
-        openLoadingOverlay();
-        submit(seq, service, input, wireModel, ratios[ratio], reference, isGrok() && nsfw);
+        refreshLibraryContent();
+        updateFloatingBarsVisibility();
+        Toast.makeText(this, "已创建独立任务，可以继续输入下一条提示词", Toast.LENGTH_SHORT).show();
     }
 
     private void startGenTimer() {
@@ -3366,53 +3329,25 @@ public final class MainActivity extends Activity {
         uiHandler.post(genTimerTick);
     }
 
-    private static void submit(long seq, ImageService service, String input, String model, String ratio, Uri reference, boolean nsfw) {
-        Handler main = new Handler(Looper.getMainLooper());
-        new Thread(() -> {
-            try {
-                String id = service.run(input, model, ratio, reference, nsfw);
-                main.post(() -> finished(seq, id, null, false));
-            } catch (Exception e) {
-                boolean wasCancelled = service.isCancelled();
-                String message = e instanceof java.net.SocketTimeoutException
-                        || e instanceof java.net.SocketException
-                        || e instanceof java.net.UnknownHostException
-                        ? "网络连接中断，请先核对原任务记录。" : e.getMessage();
-                main.post(() -> finished(seq, null, message == null ? "无法获取作品，请检查网络或服务连接。" : message, wasCancelled));
-            }
-        }, "jianyu-image").start();
-    }
-
-    private static void finished(long seq, String id, String error, boolean wasCancelled) {
-        if (seq != activeGenSeq) return;
-        busy = false;
+    private static void finished(String recordId, String id, String error, boolean wasCancelled) {
         MainActivity activity = visible;
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
-        activity.uiHandler.removeCallbacks(activity.genTimerTick);
-
-        long duration = Math.max(0, System.currentTimeMillis() - genStartMillis);
-        if (wasCancelled) {
-            GenerationRecord.Repository.updateStatus(activity, activeRecordId, GenerationRecord.STATUS_CANCELLED, null, "用户已取消", duration);
-        } else if (error != null) {
-            GenerationRecord.Repository.updateStatus(activity, activeRecordId, GenerationRecord.STATUS_FAILED, null, error, duration);
-        } else if (id != null) {
-            GenerationRecord.Repository.updateStatus(activity, activeRecordId, GenerationRecord.STATUS_SUCCESS, id, null, duration);
+        boolean wasWatching = activity.isOverlayOpen("loading") && recordId.equals(activity.loadingRecordId);
+        if (wasWatching) {
+            activity.popOverlaysByTag("loading");
+            activity.loadingTimerView = null;
         }
-
-        boolean wasWatchingOrb = activity.isOverlayOpen("loading");
-        activity.popOverlaysByTag("loading");
+        if (GenerationTasks.count() == 0) activity.uiHandler.removeCallbacks(activity.genTimerTick);
         activity.refreshHomeDynamic();
         activity.refreshLibraryContent();
         activity.updateFloatingBarsVisibility();
         if (wasCancelled) return;
-        if (error != null) {
-            new AlertDialog.Builder(activity).setMessage(error).setPositiveButton("知道了", null).show();
-        } else if (id != null) {
-            if (wasWatchingOrb) {
-                activity.openDetailOverlay(id);
-            } else {
-                Toast.makeText(activity, "新作品已绘制完成并存入作品库", Toast.LENGTH_LONG).show();
-            }
+        if (id != null) {
+            if (wasWatching) activity.openDetailOverlay(id);
+            else Toast.makeText(activity, "一条任务已完成，作品已保存", Toast.LENGTH_SHORT).show();
+        } else if (error != null) {
+            if (wasWatching) new AlertDialog.Builder(activity).setMessage(error).setPositiveButton("知道了", null).show();
+            else Toast.makeText(activity, "一条任务等待中断，可在生成记录中查看", Toast.LENGTH_SHORT).show();
         }
     }
 
