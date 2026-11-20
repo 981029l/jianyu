@@ -4,6 +4,8 @@ import android.content.Context;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.File;
 import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -46,6 +48,7 @@ public class ImageServicePollingTest {
         doReturn(Arrays.asList("test-only-key")).when(service).activeKeysLine1();
         doReturn(Arrays.asList("test-only-key")).when(service).activeKeysLine2();
         doReturn(true).when(service).isDirectMode();
+        doAnswer(call -> clock.get()).when(service).downloadClockMillis();
         doAnswer(call -> {
             long wait = call.getArgument(0);
             waits.add(wait);
@@ -159,6 +162,154 @@ public class ImageServicePollingTest {
             worker.interrupt();
             worker.join(2000);
         }
+    }
+
+    @Test public void slowContinuousDownloadHasTotalDeadlineAndKeepsOriginalUrl() throws Exception {
+        retainDownload();
+        InputStream slow = new InputStream() {
+            @Override public int read() { throw new AssertionError("Use buffered reads"); }
+            @Override public int read(byte[] buffer, int offset, int length) {
+                clock.addAndGet(70000);
+                buffer[offset] = 1;
+                return 1;
+            }
+        };
+        HttpsURLConnection download = imageResponse(slow, -1);
+        doReturn(download).when(service).connect(any(URL.class), anyInt());
+        IOException error = assertThrows(IOException.class, () -> service.run("慢下载", "image-1", "1:1", null, false));
+        assertTrue(error.getMessage().contains("下载超过 3 分钟"));
+        assertEquals("已下载 3 B", service.downloadProgress());
+        assertRetainedDownload();
+        assertNoTemporaryImages();
+        verify(service, times(1)).connect(any(URL.class), anyInt());
+        verify(download, never()).setRequestMethod("POST");
+    }
+
+    @Test public void redirectChainSharesDownloadDeadline() throws Exception {
+        retainDownload();
+        HttpsURLConnection first = mock(HttpsURLConnection.class);
+        when(first.getResponseCode()).thenAnswer(call -> { clock.addAndGet(100000); return 302; });
+        when(first.getHeaderField("Location")).thenReturn("/second.png");
+        HttpsURLConnection second = mock(HttpsURLConnection.class);
+        when(second.getResponseCode()).thenAnswer(call -> { clock.addAndGet(80001); return 302; });
+        when(second.getHeaderField("Location")).thenReturn("/third.png");
+        doReturn(first, second).when(service).connect(any(URL.class), anyInt());
+        IOException error = assertThrows(IOException.class, () -> service.run("重定向", "image-1", "1:1", null, false));
+        assertTrue(error.getMessage().contains("3 分钟"));
+        verify(service).connect(argThat(url -> url.getPath().equals("/second.png")), eq(80000));
+        verify(service, times(2)).connect(any(URL.class), anyInt());
+        assertRetainedDownload();
+    }
+
+    @Test public void successfulDownloadReportsMeasuredProgressAndSavesArtwork() throws Exception {
+        retainDownload();
+        byte[] png = pngBytes();
+        List<String> labels = new ArrayList<>();
+        InputStream chunks = new ByteArrayInputStream(png) {
+            @Override public synchronized int read(byte[] buffer, int offset, int length) {
+                labels.add(service.downloadProgress());
+                return super.read(buffer, offset, Math.min(length, png.length / 2));
+            }
+        };
+        HttpsURLConnection download = imageResponse(chunks, png.length);
+        doReturn(download).when(service).connect(any(URL.class), anyInt());
+        String imageId = service.run("海边灯塔", "image-1", "1:1", null, false);
+        assertTrue(labels.stream().anyMatch(label -> label.contains((png.length / 2 * 100 / png.length) + "%")));
+        assertTrue(service.downloadProgress().contains("100%"));
+        assertTrue(service.downloadProgress().contains(png.length + " B"));
+        assertTrue(new File(new File(context.getFilesDir(), "images"), imageId).isFile());
+        assertEquals("海边灯塔", context.getSharedPreferences("art", 0).getString(imageId, ""));
+        assertFalse(service.hasPending());
+        assertFalse(service.isSubmissionUnconfirmed());
+        verify(download, never()).setRequestMethod("POST");
+    }
+
+    @Test public void missingContentLengthShowsBytesWithoutInventedPercentage() throws Exception {
+        retainDownload();
+        byte[] png = pngBytes();
+        doReturn(imageResponse(new ByteArrayInputStream(png), -1)).when(service).connect(any(URL.class), anyInt());
+        String imageId = service.run("无大小", "image-1", "1:1", null, false);
+        assertNotNull(imageId);
+        assertEquals("已下载 " + png.length + " B", service.downloadProgress());
+        assertFalse(service.hasPending());
+    }
+
+    @Test public void truncatedDownloadRetainsUrlInsteadOfSavingIncompleteArtwork() throws Exception {
+        retainDownload();
+        byte[] png = pngBytes();
+        doReturn(imageResponse(new ByteArrayInputStream(png), png.length * 2)).when(service).connect(any(URL.class), anyInt());
+        IOException error = assertThrows(IOException.class, () -> service.run("未下完", "image-1", "1:1", null, false));
+        assertTrue(error.getMessage().contains("下载不完整"));
+        assertRetainedDownload();
+        assertNoTemporaryImages();
+    }
+
+    @Test public void stoppingDownloadAfterAChunkKeepsUrlAndDeletesPartialFile() throws Exception {
+        retainDownload();
+        InputStream interrupted = new InputStream() {
+            @Override public int read() { throw new AssertionError("Use buffered reads"); }
+            @Override public int read(byte[] buffer, int offset, int length) {
+                buffer[offset] = 1;
+                service.cancelActive();
+                return 1;
+            }
+        };
+        doReturn(imageResponse(interrupted, -1)).when(service).connect(any(URL.class), anyInt());
+        IOException error = assertThrows(IOException.class, () -> service.run("停止下载", "image-1", "1:1", null, false));
+        assertTrue(error.getMessage().contains("已取消"));
+        assertRetainedDownload();
+        assertNoTemporaryImages();
+    }
+
+    @Test public void gatewayImageBodyAlsoHasDownloadDeadline() throws Exception {
+        context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + id, 0).edit().putString("task", "gateway-task").commit();
+        doReturn(false).when(service).isDirectMode();
+        doReturn("https://example.test/generate").when(service).gatewayEndpoint();
+        InputStream slow = new InputStream() {
+            @Override public int read() { throw new AssertionError("Use buffered reads"); }
+            @Override public int read(byte[] buffer, int offset, int length) {
+                clock.addAndGet(GenerationDownload.MAX_DOWNLOAD_MS);
+                return -1;
+            }
+        };
+        doReturn(imageResponse(slow, -1)).when(service).connect(any(URL.class), anyInt());
+        IOException error = assertThrows(IOException.class, () -> service.run("网关续取", "image-1", "1:1", null, false));
+        assertTrue(error.getMessage().contains("3 分钟"));
+        assertTrue(service.hasPending());
+        assertNoTemporaryImages();
+    }
+
+    private void retainDownload() {
+        context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + id, 0).edit()
+                .putString("task", "download-task").putString("url", "https://example.test/saved.png").commit();
+    }
+
+    private void assertRetainedDownload() {
+        assertTrue(service.hasPending());
+        assertEquals("https://example.test/saved.png", context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + id, 0).getString("url", ""));
+        assertEquals("download-task", context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + id, 0).getString("task", ""));
+    }
+
+    private void assertNoTemporaryImages() {
+        File[] partials = new File(context.getFilesDir(), "images").listFiles((dir, name) -> name.startsWith("pending-"));
+        assertTrue(partials == null || partials.length == 0);
+    }
+
+    private byte[] pngBytes() throws IOException {
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(2, 2, android.graphics.Bitmap.Config.ARGB_8888);
+        try (ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output);
+            return output.toByteArray();
+        } finally { bitmap.recycle(); }
+    }
+
+    private HttpsURLConnection imageResponse(InputStream input, long length) throws Exception {
+        HttpsURLConnection conn = mock(HttpsURLConnection.class);
+        when(conn.getResponseCode()).thenReturn(200);
+        when(conn.getContentType()).thenReturn("image/png");
+        when(conn.getContentLengthLong()).thenReturn(length);
+        when(conn.getInputStream()).thenReturn(input);
+        return conn;
     }
 
     private HttpsURLConnection response(int status, String json) throws Exception {

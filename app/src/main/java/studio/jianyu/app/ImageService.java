@@ -50,6 +50,7 @@ final class ImageService {
     private volatile HttpsURLConnection activeConn;
     private final Object waitLock = new Object();
     private final GenerationPolling polling;
+    private volatile GenerationDownload downloading;
     private java.util.function.IntConsumer progressListener = status -> {};
 
     void setProgressListener(java.util.function.IntConsumer listener) { progressListener = listener; }
@@ -57,6 +58,11 @@ final class ImageService {
     boolean isSubmissionUnconfirmed() { return pending.getBoolean("submissionUnconfirmed", false); }
     String gatewayEndpoint() { return BuildConfig.IMAGE_ENDPOINT; }
     HttpsURLConnection connect(URL url, int timeout) throws IOException { return open(url, timeout); }
+    long downloadClockMillis() { return SystemClock.elapsedRealtime(); }
+    String downloadProgress() {
+        GenerationDownload progress = downloading;
+        return progress == null ? "正在连接图片服务器…" : progress.progressLabel();
+    }
 
     ImageService(Context context) {
         this(context, "");
@@ -81,6 +87,10 @@ final class ImageService {
     void cancelActive() {
         cancelled = true;
         synchronized (waitLock) { waitLock.notifyAll(); }
+        disconnectActive();
+    }
+
+    private void disconnectActive() {
         HttpsURLConnection conn = activeConn;
         if (conn != null) {
             new Thread(() -> {
@@ -444,8 +454,7 @@ final class ImageService {
                 int status = conn.getResponseCode();
                 String type = conn.getContentType();
                 if (status == 200 && (type == null || !type.toLowerCase(Locale.ROOT).contains("json"))) {
-                    reportProgress(GenerationRecord.STATUS_DOWNLOADING);
-                    try (InputStream in = conn.getInputStream()) { return save(in, prompt, meta); }
+                    try (GenerationDownload progress = beginDownload()) { return saveDownload(conn, progress, prompt, meta); }
                 }
                 JSONObject result = readJson(conn, status);
                 acknowledgeResponse(status);
@@ -965,25 +974,64 @@ final class ImageService {
     }
 
     private String download(String address, String prompt, String meta) throws IOException {
-        reportProgress(GenerationRecord.STATUS_DOWNLOADING);
-        URL target = new URL(address);
-        for (int redirects = 0; redirects < 5; redirects++) {
-            if (cancelled) throw new IOException("已取消本次等待。");
-            HttpsURLConnection conn = openTracked(target, 90000);
-            try {
-                int status = conn.getResponseCode();
-                if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
-                    target = new URL(target, conn.getHeaderField("Location"));
-                    continue;
+        try (GenerationDownload progress = beginDownload()) {
+            URL target = new URL(address);
+            for (int redirects = 0; redirects < GenerationDownload.MAX_REDIRECTS; redirects++) {
+                checkDownload(progress);
+                HttpsURLConnection conn = openTracked(target, progress.timeoutMillis());
+                try {
+                    conn.setConnectTimeout(Math.max(1, Math.min(conn.getConnectTimeout(), progress.timeoutMillis())));
+                    conn.setRequestProperty("Accept-Encoding", "identity");
+                    int status = conn.getResponseCode();
+                    checkDownload(progress);
+                    if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
+                        target = new URL(target, conn.getHeaderField("Location"));
+                        continue;
+                    }
+                    if (status != 200) throw new IOException("图片已生成，但下载失败（HTTP " + status + "），请在生成记录中继续获取。");
+                    return saveDownload(conn, progress, prompt, meta);
+                } catch (IOException error) {
+                    checkDownload(progress);
+                    throw error;
+                } finally {
+                    if (activeConn == conn) activeConn = null;
+                    conn.disconnect();
                 }
-                if (status != 200) throw new IOException("图片下载失败，可返回创作页继续取图。");
-                try (InputStream in = conn.getInputStream()) { return save(in, prompt, meta); }
-            } finally {
-                if (activeConn == conn) activeConn = null;
-                conn.disconnect();
             }
+            throw new IOException("图片下载地址重定向过多。");
         }
-        throw new IOException("图片下载地址重定向过多。");
+    }
+
+    private GenerationDownload beginDownload() {
+        GenerationDownload progress = new GenerationDownload(this::downloadClockMillis, this::disconnectActive);
+        downloading = progress;
+        reportProgress(GenerationRecord.STATUS_DOWNLOADING);
+        return progress;
+    }
+
+    private void checkDownload(GenerationDownload progress) throws IOException {
+        if (cancelled) throw new IOException("已取消本次等待。");
+        progress.check();
+    }
+
+    private String saveDownload(HttpsURLConnection conn, GenerationDownload progress, String prompt, String meta) throws IOException {
+        String encoding = conn.getContentEncoding();
+        progress.setTotal(encoding == null || "identity".equalsIgnoreCase(encoding) ? conn.getContentLengthLong() : -1);
+        checkDownload(progress);
+        conn.setReadTimeout(progress.timeoutMillis());
+        try (InputStream in = new FilterInputStream(conn.getInputStream()) {
+            @Override public int read(byte[] bytes, int offset, int length) throws IOException {
+                checkDownload(progress);
+                conn.setReadTimeout(progress.timeoutMillis());
+                int count = super.read(bytes, offset, length);
+                progress.addBytes(count);
+                checkDownload(progress);
+                if (count == -1) progress.finish();
+                return count;
+            }
+        }) {
+            return save(in, prompt, meta);
+        }
     }
 
     private static String extension(BitmapFactory.Options info) {

@@ -482,6 +482,8 @@ final class GalleryAdapters {
                 if (task != null && record.status != task.record.status) {
                     record.status = task.record.status;
                     notifyItemChanged(i);
+                } else if (task != null && task.record.status == GenerationRecord.STATUS_DOWNLOADING) {
+                    notifyItemChanged(i, task.service.downloadProgress());
                 }
             }
         }
@@ -499,6 +501,15 @@ final class GalleryAdapters {
         @Override
         public void onBindViewHolder(Holder h, int position) {
             h.bind(records.get(position));
+        }
+
+        @Override public void onBindViewHolder(Holder h, int position, List<Object> payloads) {
+            if (payloads.isEmpty()) {
+                onBindViewHolder(h, position);
+            } else {
+                h.durationText.setText((String) payloads.get(payloads.size() - 1));
+                h.durationText.setVisibility(View.VISIBLE);
+            }
         }
 
         static final class Holder extends RecyclerView.ViewHolder {
@@ -703,7 +714,11 @@ final class GalleryAdapters {
                 ratioBadge.setText(r.ratio);
                 refBadge.setVisibility(r.hasRef ? View.VISIBLE : View.GONE);
 
-                if (r.durationMs > 0) {
+                GenerationTasks.Task task = GenerationTasks.get(r.recordId);
+                if (r.status == GenerationRecord.STATUS_DOWNLOADING && task != null) {
+                    durationText.setText(task.service.downloadProgress());
+                    durationText.setVisibility(View.VISIBLE);
+                } else if (r.durationMs > 0) {
                     durationText.setText(String.format(Locale.ROOT, "累计等待 %.1fs", r.durationMs / 1000.0f));
                     durationText.setVisibility(View.VISIBLE);
                 } else {

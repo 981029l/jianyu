@@ -140,7 +140,8 @@ public final class MainActivity extends Activity {
             if (loadingStatusView != null && task != null) loadingStatusView.setText(GenerationRecord.statusLabel(task.record.status));
             if (loadingTimerView != null && task != null) {
                 long sec = Math.max(1L, (android.os.SystemClock.elapsedRealtime() - task.startedAt) / 1000L);
-                loadingTimerView.setText("已等待 " + sec + " 秒 · 完成后自动存入作品库");
+                loadingTimerView.setText(task.record.status == GenerationRecord.STATUS_DOWNLOADING
+                        ? task.service.downloadProgress() : "已等待 " + sec + " 秒 · 完成后自动存入作品库");
             }
             uiHandler.postDelayed(this, 1000L);
         }
@@ -2414,7 +2415,8 @@ public final class MainActivity extends Activity {
         orbHolder.addView(loadingStatusView, slp);
 
         long sec = Math.max(1L, (android.os.SystemClock.elapsedRealtime() - task.startedAt) / 1000L);
-        loadingTimerView = UiKit.text(this, "已等待 " + sec + " 秒 · 完成后自动存入作品库", 13, UiKit.MUTED, false);
+        loadingTimerView = UiKit.text(this, record.status == GenerationRecord.STATUS_DOWNLOADING
+                ? task.service.downloadProgress() : "已等待 " + sec + " 秒 · 完成后自动存入作品库", 13, UiKit.MUTED, false);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
         tlp.topMargin = dp(6);
         orbHolder.addView(loadingTimerView, tlp);

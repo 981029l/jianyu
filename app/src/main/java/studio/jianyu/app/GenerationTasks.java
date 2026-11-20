@@ -78,9 +78,10 @@ final class GenerationTasks {
             Uri reference = record.hasRef && !record.refUriStr.isEmpty() ? Uri.parse(record.refUriStr) : null;
             imageId = task.service.run(record.prompt, record.wireModel, record.ratio, reference, record.nsfw);
         } catch (Exception e) {
+            boolean downloading = record.status == GenerationRecord.STATUS_DOWNLOADING;
             error = e instanceof java.net.SocketTimeoutException || e instanceof java.net.SocketException
                     || e instanceof java.net.UnknownHostException
-                    ? "网络连接中断，请先核对原任务记录。" : e.getMessage();
+                    ? (downloading ? "图片已生成，但下载连接中断，请检查网络后继续获取。" : "网络连接中断，请先核对原任务记录。") : e.getMessage();
             if (error == null || error.isEmpty()) error = "无法获取作品，请检查网络或服务连接。";
         }
         boolean cancelled = imageId == null && task.service.isCancelled();

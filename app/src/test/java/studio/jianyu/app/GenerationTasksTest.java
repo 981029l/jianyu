@@ -220,6 +220,24 @@ public class GenerationTasksTest {
         assertEquals(GenerationRecord.STATUS_UNCONFIRMED, saved(submitting.recordId).status);
     }
 
+    @Test public void downloadTimeoutLeavesActiveStateAndExplainsImageAlreadyGenerated() throws Exception {
+        GenerationRecord record = record("下载断网");
+        ImageService service = mock(ImageService.class);
+        java.util.concurrent.atomic.AtomicReference<java.util.function.IntConsumer> progress = new java.util.concurrent.atomic.AtomicReference<>();
+        doAnswer(call -> { progress.set(call.getArgument(0)); return null; }).when(service).setProgressListener(any());
+        when(service.hasPending()).thenReturn(true);
+        when(service.run(anyString(), anyString(), anyString(), isNull(), anyBoolean())).thenAnswer(call -> {
+            progress.get().accept(GenerationRecord.STATUS_DOWNLOADING);
+            throw new java.net.SocketTimeoutException();
+        });
+        GenerationTasks.start(context, record, service, (r, i, e, c) -> {});
+        awaitFinished(record.recordId);
+        assertEquals(GenerationRecord.STATUS_WAITING, saved(record.recordId).status);
+        assertTrue(saved(record.recordId).errorMessage.contains("图片已生成"));
+        assertTrue(saved(record.recordId).errorMessage.contains("不会重复提交"));
+        assertNull(GenerationTasks.get(record.recordId));
+    }
+
     private GenerationRecord record(String prompt) {
         return new GenerationRecord(UUID.randomUUID().toString(), System.currentTimeMillis(), 0, "线路 1",
                 "GPT", "image-1", "1:1", prompt, false, "", false, GenerationRecord.STATUS_RUNNING, "", "", 0);
