@@ -23,6 +23,7 @@ import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
 import static org.junit.Assert.*;
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
@@ -201,7 +202,8 @@ public class ImageServicePollingTest {
         assertRetainedDownload();
     }
 
-    @Test public void successfulDownloadReportsMeasuredProgressAndSavesArtwork() throws Exception {
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void successfulDownloadReportsMeasuredProgressAndSavesArtwork() throws Exception {
         retainDownload();
         byte[] png = pngBytes();
         List<String> labels = new ArrayList<>();
@@ -224,7 +226,8 @@ public class ImageServicePollingTest {
         verify(download, never()).setRequestMethod("POST");
     }
 
-    @Test public void missingContentLengthShowsBytesWithoutInventedPercentage() throws Exception {
+    @Test @GraphicsMode(GraphicsMode.Mode.NATIVE)
+    public void missingContentLengthShowsBytesWithoutInventedPercentage() throws Exception {
         retainDownload();
         byte[] png = pngBytes();
         doReturn(imageResponse(new ByteArrayInputStream(png), -1)).when(service).connect(any(URL.class), anyInt());
