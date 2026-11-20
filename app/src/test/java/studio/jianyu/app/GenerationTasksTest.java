@@ -46,7 +46,7 @@ public class GenerationTasksTest {
             awaitFinished(second.recordId);
             assertNotNull(GenerationTasks.get(first.recordId));
             assertEquals("cabin.png", saved(second.recordId).resultImageId);
-            assertEquals(GenerationRecord.STATUS_RUNNING, saved(first.recordId).status);
+            assertEquals(GenerationRecord.STATUS_SUBMITTING, saved(first.recordId).status);
             releaseFirst.countDown();
             awaitFinished(first.recordId);
             assertEquals("lighthouse.png", saved(first.recordId).resultImageId);
@@ -130,7 +130,7 @@ public class GenerationTasksTest {
         a.forget();
         assertTrue(b.hasPending());
         assertEquals(2, GenerationRecord.Repository.getAll(context).size());
-        assertEquals(GenerationRecord.STATUS_FAILED, saved(first.recordId).status);
+        assertEquals(GenerationRecord.STATUS_WAITING, saved(first.recordId).status);
     }
 
     @Test public void clearAndDeletePreserveRunningRecords() {
@@ -145,6 +145,79 @@ public class GenerationTasksTest {
         assertEquals(1, GenerationRecord.Repository.getAll(context).size());
         assertEquals(running.recordId, GenerationRecord.Repository.getAll(context).get(0).recordId);
         GenerationTasks.restore(context);
+    }
+
+    @Test public void retainedTaskAndUnconfirmedSubmissionAreNotFailures() throws Exception {
+        GenerationRecord pending = record("原任务继续获取");
+        ImageService service = mock(ImageService.class);
+        when(service.hasPending()).thenReturn(true);
+        when(service.run(anyString(), anyString(), anyString(), isNull(), anyBoolean()))
+                .thenThrow(new java.net.SocketTimeoutException());
+        GenerationTasks.start(context, pending, service, (r, i, e, c) -> {});
+        awaitFinished(pending.recordId);
+        assertEquals(GenerationRecord.STATUS_WAITING, saved(pending.recordId).status);
+        assertTrue(saved(pending.recordId).errorMessage.contains("不会重复提交"));
+        GenerationRecord unknown = record("提交断网");
+        ImageService uncertain = mock(ImageService.class);
+        when(uncertain.isSubmissionUnconfirmed()).thenReturn(true);
+        when(uncertain.run(anyString(), anyString(), anyString(), isNull(), anyBoolean()))
+                .thenThrow(new java.net.SocketException());
+        GenerationTasks.start(context, unknown, uncertain, (r, i, e, c) -> {});
+        awaitFinished(unknown.recordId);
+        assertEquals(GenerationRecord.STATUS_UNCONFIRMED, saved(unknown.recordId).status);
+    }
+
+    @Test public void stoppingWaitKeepsResumableTask() throws Exception {
+        GenerationRecord record = record("只停止等待");
+        ImageService service = mock(ImageService.class);
+        when(service.hasPending()).thenReturn(true);
+        when(service.isCancelled()).thenReturn(true);
+        when(service.run(anyString(), anyString(), anyString(), isNull(), anyBoolean()))
+                .thenThrow(new IOException("stopped"));
+        GenerationTasks.start(context, record, service, (r, i, e, c) -> {});
+        awaitFinished(record.recordId);
+        assertEquals(GenerationRecord.STATUS_WAITING, saved(record.recordId).status);
+    }
+
+    @Test public void activeStagesPersistAndCannotBeDeleted() throws Exception {
+        GenerationRecord record = record("下载阶段");
+        ImageService service = mock(ImageService.class);
+        java.util.concurrent.atomic.AtomicReference<java.util.function.IntConsumer> progress = new java.util.concurrent.atomic.AtomicReference<>();
+        doAnswer(call -> { progress.set(call.getArgument(0)); return null; }).when(service).setProgressListener(any());
+        when(service.run(anyString(), anyString(), anyString(), isNull(), anyBoolean())).thenAnswer(call -> {
+            for (int status : new int[]{GenerationRecord.STATUS_QUEUED, GenerationRecord.STATUS_RUNNING, GenerationRecord.STATUS_DOWNLOADING}) {
+                progress.get().accept(status);
+                assertEquals(status, saved(record.recordId).status);
+                GenerationRecord.Repository.deleteRecord(context, record.recordId);
+                GenerationRecord.Repository.clearAll(context);
+                assertEquals(status, saved(record.recordId).status);
+            }
+            return "saved.png";
+        });
+        GenerationTasks.start(context, record, service, (r, i, e, c) -> {});
+        awaitFinished(record.recordId);
+        assertEquals(GenerationRecord.STATUS_SUCCESS, saved(record.recordId).status);
+    }
+
+    @Test public void restoringPreservesPauseReasonAndMarksInterruptedStagesRecoverable() {
+        GenerationRecord paused = record("查询达到时限");
+        paused.status = GenerationRecord.STATUS_WAITING;
+        paused.errorMessage = "已达到 20 分钟自动查询时限";
+        GenerationRecord.Repository.saveRecord(context, paused);
+        context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + paused.recordId, 0)
+                .edit().putString("task", "paused-task").commit();
+        GenerationRecord downloading = record("下载中退出");
+        downloading.status = GenerationRecord.STATUS_DOWNLOADING;
+        GenerationRecord.Repository.saveRecord(context, downloading);
+        context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + downloading.recordId, 0)
+                .edit().putString("url", "https://example.test/image.png").commit();
+        GenerationRecord submitting = record("提交时退出");
+        submitting.status = GenerationRecord.STATUS_SUBMITTING;
+        GenerationRecord.Repository.saveRecord(context, submitting);
+        GenerationTasks.restore(context);
+        assertEquals("已达到 20 分钟自动查询时限", saved(paused.recordId).errorMessage);
+        assertEquals(GenerationRecord.STATUS_WAITING, saved(downloading.recordId).status);
+        assertEquals(GenerationRecord.STATUS_UNCONFIRMED, saved(submitting.recordId).status);
     }
 
     private GenerationRecord record(String prompt) {

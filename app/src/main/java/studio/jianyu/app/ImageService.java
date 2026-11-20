@@ -9,6 +9,7 @@ import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.provider.MediaStore;
 import android.util.Base64;
 import androidx.core.content.FileProvider;
@@ -47,12 +48,26 @@ final class ImageService {
     private final SharedPreferences config;
     private volatile boolean cancelled;
     private volatile HttpsURLConnection activeConn;
+    private final Object waitLock = new Object();
+    private final GenerationPolling polling;
+    private java.util.function.IntConsumer progressListener = status -> {};
+
+    void setProgressListener(java.util.function.IntConsumer listener) { progressListener = listener; }
+    private void reportProgress(int status) { progressListener.accept(status); }
+    boolean isSubmissionUnconfirmed() { return pending.getBoolean("submissionUnconfirmed", false); }
+    String gatewayEndpoint() { return BuildConfig.IMAGE_ENDPOINT; }
+    HttpsURLConnection connect(URL url, int timeout) throws IOException { return open(url, timeout); }
 
     ImageService(Context context) {
         this(context, "");
     }
 
     ImageService(Context context, String recordId) {
+        this(context, recordId, new GenerationPolling(SystemClock::elapsedRealtime));
+    }
+
+    ImageService(Context context, String recordId, GenerationPolling polling) {
+        this.polling = polling;
         this.context = context.getApplicationContext();
         String name = PENDING_PREFS + (recordId.isEmpty() ? "" : "-" + recordId);
         pending = this.context.getSharedPreferences(name, Context.MODE_PRIVATE);
@@ -65,6 +80,7 @@ final class ImageService {
     boolean isCancelled() { return cancelled; }
     void cancelActive() {
         cancelled = true;
+        synchronized (waitLock) { waitLock.notifyAll(); }
         HttpsURLConnection conn = activeConn;
         if (conn != null) {
             new Thread(() -> {
@@ -75,12 +91,12 @@ final class ImageService {
 
     private HttpsURLConnection openTracked(URL url, int timeout) throws IOException {
         if (cancelled) throw new IOException("已取消本次等待。");
-        HttpsURLConnection conn = open(url, timeout);
+        HttpsURLConnection conn = connect(url, timeout);
         activeConn = conn;
         return conn;
     }
 
-    boolean isDirectMode() { return BuildConfig.IMAGE_ENDPOINT.isEmpty(); }
+    boolean isDirectMode() { return gatewayEndpoint().isEmpty(); }
     boolean isConfigured() { return !isDirectMode() || !activeKeysLine1().isEmpty() || !activeKeysLine2().isEmpty(); }
     boolean isLineConfigured(String model) {
         if (!isDirectMode()) return true;
@@ -354,8 +370,51 @@ final class ImageService {
 
     String run(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
         if (cancelled) throw new IOException("已取消本次等待。");
+        if (isSubmissionUnconfirmed() && !hasPending())
+            throw new IOException("上次提交结果尚未确认，请先核对服务端记录，避免重复生成。");
+        reportProgress(hasPending() ? GenerationRecord.STATUS_RUNNING : GenerationRecord.STATUS_SUBMITTING);
         if (!isDirectMode()) return runGateway(prompt, model, ratio, reference, nsfw);
         return runDirect(prompt, model, ratio, reference, nsfw);
+    }
+
+    private void markSubmitting() {
+        pending.edit().putBoolean("submissionUnconfirmed", true).commit();
+    }
+
+    private void acknowledgeResponse(int status) {
+        if (status >= 400 && status < 500 && status != 408)
+            pending.edit().remove("submissionUnconfirmed").commit();
+    }
+
+    private static boolean isRetryableStatus(int status) {
+        return status == 408 || status == 429 || status >= 500;
+    }
+
+    private static int pollingStatus(String state) {
+        return "queued".equals(state) || "pending".equals(state)
+                ? GenerationRecord.STATUS_QUEUED : GenerationRecord.STATUS_RUNNING;
+    }
+
+    void awaitNextPoll(int status) throws IOException {
+        reportProgress(status);
+        waitForPoll(polling.nextDelayMillis());
+        polling.queryTimeoutMillis();
+    }
+
+    void waitForPoll(long delayMs) throws IOException {
+        long until = SystemClock.elapsedRealtime() + delayMs;
+        synchronized (waitLock) {
+            while (!cancelled) {
+                long remaining = until - SystemClock.elapsedRealtime();
+                if (remaining <= 0) return;
+                try { waitLock.wait(remaining); }
+                catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("等待已中断，可稍后继续获取原任务。", e);
+                }
+            }
+        }
+        throw new IOException("已停止本次等待。");
     }
 
     private String runGateway(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
@@ -367,33 +426,43 @@ final class ImageService {
             ratio = pending.getString("ratio", ratio);
         }
         String meta = wireToDisplayModel(model) + "|" + ratio;
-        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
+        if (!imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
         boolean submit = task.isEmpty();
         while (true) {
             if (cancelled) throw new IOException("已取消本次等待。");
-            String endpoint = BuildConfig.IMAGE_ENDPOINT + (submit ? "" : "?task_id=" + Uri.encode(task));
-            HttpsURLConnection conn = openTracked(new URL(endpoint), submit ? 1950000 : 60000);
+            String endpoint = gatewayEndpoint() + (submit ? "" : "?task_id=" + Uri.encode(task));
+            HttpsURLConnection conn = openTracked(new URL(endpoint), submit ? 1950000 : polling.queryTimeoutMillis());
             try {
                 conn.setRequestProperty("Accept", "application/json, image/png, image/jpeg, image/webp");
                 if (submit) {
                     JSONObject body = new JSONObject().put("prompt", prompt).put("model", model).put("ratio", ratio);
                     if ("Image 2".equals(model) || "image-2".equals(model)) body.put("nsfw", nsfw);
                     if (reference != null) body.put("image", referenceData(reference));
+                    markSubmitting();
                     sendJson(conn, body);
                 }
                 int status = conn.getResponseCode();
                 String type = conn.getContentType();
                 if (status == 200 && (type == null || !type.toLowerCase(Locale.ROOT).contains("json"))) {
+                    reportProgress(GenerationRecord.STATUS_DOWNLOADING);
                     try (InputStream in = conn.getInputStream()) { return save(in, prompt, meta); }
                 }
                 JSONObject result = readJson(conn, status);
+                acknowledgeResponse(status);
                 task = jsonTaskId(result, task);
                 imageUrl = jsonString(result, "image_url");
                 savePending(prompt, task, imageUrl, "", model, ratio);
                 if (status == 200 && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
                 if (status == 202 && !task.isEmpty()) {
-                    if (!submit) throw new IOException("原任务仍在处理中，稍后可继续查询。");
                     submit = false;
+                    conn.disconnect();
+                    awaitNextPoll(GenerationRecord.STATUS_RUNNING);
+                    continue;
+                }
+                if (hasPending() && isRetryableStatus(status)) {
+                    submit = false;
+                    conn.disconnect();
+                    awaitNextPoll(GenerationRecord.STATUS_RUNNING);
                     continue;
                 }
                 if (status == 410) forget();
@@ -429,7 +498,7 @@ final class ImageService {
             ratio = pending.getString("ratio", ratio);
         }
         String meta = wireToDisplayModel(model) + "|" + ratio;
-        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
+        if (!imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
         boolean submit = task.isEmpty();
         while (true) {
             if (cancelled) throw new IOException("已取消本次等待。");
@@ -461,9 +530,11 @@ final class ImageService {
                 try {
                     conn.setRequestProperty("Authorization", "Bearer " + usedKey);
                     conn.setRequestProperty("Accept", "application/json");
+                    markSubmitting();
                     sendJson(conn, body);
                     status = conn.getResponseCode();
                     result = readJson(conn, status);
+                    acknowledgeResponse(status);
                 } finally {
                     if (activeConn == conn) activeConn = null;
                     conn.disconnect();
@@ -478,12 +549,13 @@ final class ImageService {
                 for (String candidate : candidates) {
                     if (cancelled) throw new IOException("已取消本次等待。");
                     usedKey = candidate;
-                    HttpsURLConnection conn = openTracked(new URL(LINE1_BASE + "/tasks/" + Uri.encode(task)), 60000);
+                    HttpsURLConnection conn = openTracked(new URL(LINE1_BASE + "/tasks/" + Uri.encode(task)), polling.queryTimeoutMillis());
                     try {
                         conn.setRequestProperty("Authorization", "Bearer " + candidate);
                         conn.setRequestProperty("Accept", "application/json");
                         status = conn.getResponseCode();
                         result = readJson(conn, status);
+                        acknowledgeResponse(status);
                     } finally {
                         if (activeConn == conn) activeConn = null;
                         conn.disconnect();
@@ -515,8 +587,26 @@ final class ImageService {
             taskKey = usedKey;
             String detailText = extractDetail(result);
             if (detailText.isEmpty()) detailText = extractDetail(container);
+            String state = jsonString(result, "status").toLowerCase(Locale.ROOT);
+            if (state.isEmpty()) state = jsonString(container, "status").toLowerCase(Locale.ROOT);
+            boolean doneState = "completed".equals(state) || "done".equals(state)
+                    || "success".equals(state) || "succeeded".equals(state);
+            boolean failed = "failed".equals(state) || "error".equals(state)
+                    || "cancelled".equals(state) || "canceled".equals(state)
+                    || container.optBoolean("refunded", false)
+                    || (container.has("delivered_count") && container.optInt("delivered_count", -1) == 0 && doneState);
+            if (failed) {
+                forget();
+                throw new IOException(formatError("任务未交付图片，请重试。", detailText));
+            }
             if (status < 200 || status >= 300) {
+                if (status == 410) { forget(); throw new IOException("原任务已失效，请核对任务与额度记录。"); }
                 if (!task.isEmpty()) savePending(prompt, task, "", usedKey, model, ratio);
+                if (!task.isEmpty() && isRetryableStatus(status)) {
+                    submit = false;
+                    awaitNextPoll(GenerationRecord.STATUS_RUNNING);
+                    continue;
+                }
                 String base;
                 if (status == 400 || status == 422) base = "请检查提示词或参考图。";
                 else if (status == 401) base = "请检查线路 1 密钥。";
@@ -525,32 +615,10 @@ final class ImageService {
                 else base = "线路 1 未返回作品，请核对任务记录。";
                 throw new IOException(formatError(base, detailText));
             }
-            String state = jsonString(result, "status").toLowerCase(Locale.ROOT);
-            if (state.isEmpty()) state = jsonString(container, "status").toLowerCase(Locale.ROOT);
-            boolean activeState = "queued".equals(state) || "pending".equals(state)
-                    || "running".equals(state) || "processing".equals(state);
-            boolean failed = "failed".equals(state) || "error".equals(state)
-                    || "cancelled".equals(state) || "canceled".equals(state)
-                    || container.optBoolean("refunded", false)
-                    || (container.has("delivered_count") && container.optInt("delivered_count", -1) == 0 && !activeState);
-            if (failed) {
-                forget();
-                throw new IOException(formatError("任务未交付图片，请重试。", detailText));
-            }
-            boolean doneState = "completed".equals(state) || "done".equals(state)
-                    || "succeeded".equals(state) || "success".equals(state);
-            if (!task.isEmpty() && !doneState) {
+            if (!task.isEmpty()) {
                 savePending(prompt, task, "", usedKey, model, ratio);
-                if (submit) {
-                    submit = false;
-                    try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
-                    continue;
-                }
-                try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
-                continue;
-            }
-            if (!submit && !task.isEmpty()) {
-                try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
+                submit = false;
+                awaitNextPoll(pollingStatus(state));
                 continue;
             }
             throw new IOException(formatError("结果中缺少可下载的图片地址。", detailText));
@@ -567,7 +635,7 @@ final class ImageService {
             ratio = pending.getString("ratio", ratio);
         }
         String meta = wireToDisplayModel(model) + "|" + ratio;
-        if (task.isEmpty() && !imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
+        if (!imageUrl.isEmpty()) return download(imageUrl, prompt, meta);
         boolean submit = task.isEmpty();
         while (true) {
             if (cancelled) throw new IOException("已取消本次等待。");
@@ -590,9 +658,11 @@ final class ImageService {
                     try {
                         conn.setRequestProperty("Authorization", "Bearer " + usedKey);
                         conn.setRequestProperty("Accept", "application/json");
+                        markSubmitting();
                         sendJson(conn, body);
                         status = conn.getResponseCode();
                         result = readJson(conn, status);
+                        acknowledgeResponse(status);
                     } finally {
                         if (activeConn == conn) activeConn = null;
                         conn.disconnect();
@@ -609,9 +679,11 @@ final class ImageService {
                     try {
                         conn.setRequestProperty("Authorization", "Bearer " + usedKey);
                         conn.setRequestProperty("Accept", "application/json");
+                        markSubmitting();
                         sendMultipart(conn, boundary, fields, "image", reference);
                         status = conn.getResponseCode();
                         result = readJson(conn, status);
+                        acknowledgeResponse(status);
                     } finally {
                         if (activeConn == conn) activeConn = null;
                         conn.disconnect();
@@ -628,12 +700,13 @@ final class ImageService {
                 for (String candidate : candidates) {
                     if (cancelled) throw new IOException("已取消本次等待。");
                     usedKey = candidate;
-                    HttpsURLConnection conn = openTracked(new URL(LINE2_BASE + "/api/image-tasks?ids=" + Uri.encode(task)), 60000);
+                    HttpsURLConnection conn = openTracked(new URL(LINE2_BASE + "/api/image-tasks?ids=" + Uri.encode(task)), polling.queryTimeoutMillis());
                     try {
                         conn.setRequestProperty("Authorization", "Bearer " + candidate);
                         conn.setRequestProperty("Accept", "application/json");
                         status = conn.getResponseCode();
                         result = readJson(conn, status);
+                        acknowledgeResponse(status);
                     } finally {
                         if (activeConn == conn) activeConn = null;
                         conn.disconnect();
@@ -642,71 +715,17 @@ final class ImageService {
                 }
             }
 
-            // 1. 同步返回 data[0].url
-            JSONArray directData = result.optJSONArray("data");
-            if (directData != null && directData.length() > 0) {
-                for (int i = 0; i < directData.length(); i++) {
-                    JSONObject dItem = directData.optJSONObject(i);
-                    String url = jsonString(dItem, "url");
-                    if (url.startsWith("https://") || url.startsWith("http://")) {
-                        savePending(prompt, "", url, usedKey, model, ratio);
-                        return download(url, prompt, meta);
-                    }
-                }
-            }
-
-            // 2. 轮询结果 items[0]
-            JSONArray pollItems = result.optJSONArray("items");
-            if (pollItems != null && pollItems.length() > 0) {
-                JSONObject pItem = pollItems.optJSONObject(0);
-                if (pItem != null) {
-                    String pStatus = jsonString(pItem, "status").toLowerCase(Locale.ROOT);
-                    if ("success".equals(pStatus)) {
-                        JSONArray pResults = pItem.optJSONArray("results");
-                        if (pResults != null && pResults.length() > 0) {
-                            JSONObject res0 = pResults.optJSONObject(0);
-                            String url = jsonString(res0, "url");
-                            if (url.startsWith("https://") || url.startsWith("http://")) {
-                                savePending(prompt, "", url, usedKey, model, ratio);
-                                return download(url, prompt, meta);
-                            }
-                        }
-                    } else if ("failed".equals(pStatus) || "text_review".equals(pStatus)
-                            || "error".equals(pStatus) || "cancelled".equals(pStatus)) {
-                        forget();
-                        String err = jsonString(pItem, "public_error");
-                        if (err.isEmpty()) err = jsonString(pItem, "error_code");
-                        if (err.isEmpty()) err = "生成未能交付画面，请调整描述后重试。";
-                        throw new IOException(err);
-                    } else {
-                        // queued, running, generating
-                        task = jsonString(pItem, "id");
-                        taskKey = usedKey;
-                        savePending(prompt, task, "", usedKey, model, ratio);
-                        if (!submit) {
-                            try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
-                        }
-                        submit = false;
-                        continue;
-                    }
-                }
-            }
-
-            // 3. 首次提交返回 task_id 进入排队轮询
             task = jsonTaskId(result, task);
             taskKey = usedKey;
-            if (!task.isEmpty()) {
-                savePending(prompt, task, "", usedKey, model, ratio);
-                if (submit) {
-                    submit = false;
-                    try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
-                    continue;
-                }
-            }
-
+            if (!task.isEmpty()) savePending(prompt, task, "", usedKey, model, ratio);
             String detailText = extractDetail(result);
             if (status < 200 || status >= 300) {
-                if (!task.isEmpty()) savePending(prompt, task, "", usedKey, model, ratio);
+                if (status == 410) { forget(); throw new IOException("原任务已失效，请核对任务与额度记录。"); }
+                if (!task.isEmpty() && isRetryableStatus(status)) {
+                    submit = false;
+                    awaitNextPoll(GenerationRecord.STATUS_RUNNING);
+                    continue;
+                }
                 String base;
                 if (status == 400 || status == 422) base = "请检查提示词或参考图。";
                 else if (status == 401) base = "请检查线路 2 密钥。";
@@ -715,13 +734,47 @@ final class ImageService {
                 else base = "线路 2 未返回作品，请核对任务记录。";
                 throw new IOException(formatError(base, detailText));
             }
-
-            if (!submit && !task.isEmpty()) {
-                try { Thread.sleep(2500L); } catch (InterruptedException ignored) { }
+            JSONArray directData = result.optJSONArray("data");
+            if (directData != null) {
+                for (int i = 0; i < directData.length(); i++) {
+                    String url = jsonString(directData.optJSONObject(i), "url");
+                    if (url.startsWith("https://") || url.startsWith("http://")) {
+                        savePending(prompt, task, url, usedKey, model, ratio);
+                        return download(url, prompt, meta);
+                    }
+                }
+            }
+            JSONArray pollItems = result.optJSONArray("items");
+            JSONObject item = pollItems != null ? pollItems.optJSONObject(0) : null;
+            if (item == null) item = result;
+            String state = jsonString(item, "status").toLowerCase(Locale.ROOT);
+            if ("failed".equals(state) || "text_review".equals(state) || "error".equals(state)
+                    || "cancelled".equals(state) || "canceled".equals(state) || item.optBoolean("refunded", false)) {
+                forget();
+                String error = jsonString(item, "public_error");
+                if (error.isEmpty()) error = jsonString(item, "error_code");
+                if (error.isEmpty()) error = "生成未能交付画面，请调整描述后重试。";
+                throw new IOException(error);
+            }
+            JSONArray results = item.optJSONArray("results");
+            if (results != null) {
+                for (int i = 0; i < results.length(); i++) {
+                    String url = jsonString(results.optJSONObject(i), "url");
+                    if (url.startsWith("https://") || url.startsWith("http://")) {
+                        savePending(prompt, task, url, usedKey, model, ratio);
+                        return download(url, prompt, meta);
+                    }
+                }
+            }
+            String itemId = jsonString(item, "id");
+            if (!itemId.isEmpty() && TASK_ID.matcher(itemId).matches()) task = itemId;
+            if (!task.isEmpty()) {
+                savePending(prompt, task, "", usedKey, model, ratio);
+                submit = false;
+                awaitNextPoll(pollingStatus(state));
                 continue;
             }
-
-            throw new IOException(formatError("结果中缺少可下载的图片地址。", detailText));
+            throw new IOException(formatError("结果中缺少可下载的图片地址，请先核对服务端记录。", detailText));
         }
     }
 
@@ -792,6 +845,7 @@ final class ImageService {
     private void savePending(String prompt, String task, String imageUrl, String key, String model, String ratio) {
         if (task.isEmpty() && imageUrl.isEmpty()) return;
         SharedPreferences.Editor edit = pending.edit()
+                .remove("submissionUnconfirmed")
                 .putString("prompt", prompt)
                 .putString("model", model)
                 .putString("ratio", ratio);
@@ -911,6 +965,7 @@ final class ImageService {
     }
 
     private String download(String address, String prompt, String meta) throws IOException {
+        reportProgress(GenerationRecord.STATUS_DOWNLOADING);
         URL target = new URL(address);
         for (int redirects = 0; redirects < 5; redirects++) {
             if (cancelled) throw new IOException("已取消本次等待。");

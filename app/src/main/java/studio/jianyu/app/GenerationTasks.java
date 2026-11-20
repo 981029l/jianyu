@@ -5,6 +5,7 @@ import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -18,7 +19,7 @@ final class GenerationTasks {
     static final class Task {
         final GenerationRecord record;
         final ImageService service;
-        final long startedAt = System.currentTimeMillis();
+        final long startedAt = SystemClock.elapsedRealtime();
 
         Task(GenerationRecord record, ImageService service) {
             this.record = record;
@@ -51,11 +52,16 @@ final class GenerationTasks {
     static synchronized void start(Context context, GenerationRecord record, ImageService service, Listener listener) {
         if (active.containsKey(record.recordId)) return;
         Context app = context.getApplicationContext();
-        record.status = GenerationRecord.STATUS_RUNNING;
+        record.status = service.hasPending() ? GenerationRecord.STATUS_RUNNING : GenerationRecord.STATUS_SUBMITTING;
         record.errorMessage = "";
         GenerationRecord.Repository.saveRecord(app, record);
         Task task = new Task(record, service);
         active.put(record.recordId, task);
+        service.setProgressListener(status -> {
+            if (record.status == status) return;
+            record.status = status;
+            GenerationRecord.Repository.updateStatus(app, record.recordId, status, null, "", record.durationMs);
+        });
         new Thread(() -> execute(app, task, listener), "jianyu-image-" + record.recordId).start();
     }
 
@@ -78,11 +84,18 @@ final class GenerationTasks {
             if (error == null || error.isEmpty()) error = "无法获取作品，请检查网络或服务连接。";
         }
         boolean cancelled = imageId == null && task.service.isCancelled();
+        boolean resumable = imageId == null && task.service.hasPending();
+        boolean unconfirmed = imageId == null && task.service.isSubmissionUnconfirmed();
         int status = imageId != null ? GenerationRecord.STATUS_SUCCESS
+                : resumable ? GenerationRecord.STATUS_WAITING
+                : unconfirmed ? GenerationRecord.STATUS_UNCONFIRMED
                 : cancelled ? GenerationRecord.STATUS_CANCELLED : GenerationRecord.STATUS_FAILED;
-        long duration = record.durationMs + Math.max(0, System.currentTimeMillis() - task.startedAt);
+        if (resumable) error = cancelled ? "已停止本机等待，原任务仍可能继续，可稍后继续获取。"
+                : (error == null ? "等待已中断。" : error) + " 原任务已保留，点击继续获取，不会重复提交。";
+        else if (unconfirmed) error = "提交结果尚未确认，请先核对服务端任务与额度记录，避免重复生成。";
+        long duration = record.durationMs + Math.max(0, SystemClock.elapsedRealtime() - task.startedAt);
         GenerationRecord.Repository.updateStatus(app, record.recordId, status, imageId,
-                cancelled ? "用户已中断等待" : error, duration);
+                cancelled && !resumable && !unconfirmed ? "已停止等待，未向服务端发送取消指令。" : error, duration);
         synchronized (GenerationTasks.class) { active.remove(record.recordId); }
         String result = imageId;
         String message = error;
@@ -117,11 +130,16 @@ final class GenerationTasks {
             if (copy.commit()) legacy.edit().clear().commit();
         }
         for (GenerationRecord record : records) {
-            if (record.status == GenerationRecord.STATUS_RUNNING && !active.containsKey(record.recordId)) {
-                String message = canResume(app, record.recordId) ? "等待已中断，可继续获取原任务。"
-                        : "应用退出时等待中断，请核对服务端任务后再重新创作。";
-                GenerationRecord.Repository.updateStatus(app, record.recordId, GenerationRecord.STATUS_FAILED,
-                        null, message, record.durationMs);
+            if (active.containsKey(record.recordId) || record.status == GenerationRecord.STATUS_SUCCESS) continue;
+            ImageService service = new ImageService(app, record.recordId);
+            boolean resumable = service.hasPending();
+            if (GenerationRecord.isActive(record.status)
+                    || (resumable && record.status != GenerationRecord.STATUS_WAITING)
+                    || (service.isSubmissionUnconfirmed() && record.status != GenerationRecord.STATUS_UNCONFIRMED)) {
+                int status = resumable ? GenerationRecord.STATUS_WAITING : GenerationRecord.STATUS_UNCONFIRMED;
+                String message = resumable ? "等待已中断，原任务已保留，可继续获取。"
+                        : "应用退出时等待中断，请先核对服务端任务与额度记录，避免重复生成。";
+                GenerationRecord.Repository.updateStatus(app, record.recordId, status, null, message, record.durationMs);
             }
         }
     }

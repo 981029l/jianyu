@@ -475,6 +475,17 @@ final class GalleryAdapters {
             notifyDataSetChanged();
         }
 
+        void refreshActiveStatuses() {
+            for (int i = 0; i < records.size(); i++) {
+                GenerationRecord record = records.get(i);
+                GenerationTasks.Task task = GenerationTasks.get(record.recordId);
+                if (task != null && record.status != task.record.status) {
+                    record.status = task.record.status;
+                    notifyItemChanged(i);
+                }
+            }
+        }
+
         @Override
         public int getItemCount() {
             return records.size();
@@ -655,8 +666,11 @@ final class GalleryAdapters {
 
             void bind(GenerationRecord r) {
                 switch (r.status) {
+                    case GenerationRecord.STATUS_SUBMITTING:
+                    case GenerationRecord.STATUS_QUEUED:
+                    case GenerationRecord.STATUS_DOWNLOADING:
                     case GenerationRecord.STATUS_RUNNING:
-                        statusBadge.setText("绘制中…");
+                        statusBadge.setText(GenerationRecord.statusLabel(r.status));
                         statusBadge.setTextColor(UiKit.BLUE);
                         statusBadge.setBackground(UiKit.round(ctx, UiKit.BLUE_SOFT, 10));
                         break;
@@ -670,9 +684,15 @@ final class GalleryAdapters {
                         statusBadge.setTextColor(UiKit.DANGER);
                         statusBadge.setBackground(UiKit.round(ctx, UiKit.DANGER_SOFT, 10));
                         break;
+                    case GenerationRecord.STATUS_WAITING:
+                    case GenerationRecord.STATUS_UNCONFIRMED:
+                        statusBadge.setText(GenerationRecord.statusLabel(r.status));
+                        statusBadge.setTextColor(0xFFB7791F);
+                        statusBadge.setBackground(UiKit.round(ctx, 0xFFFFF4E5, 10));
+                        break;
                     case GenerationRecord.STATUS_CANCELLED:
                     default:
-                        statusBadge.setText("已取消");
+                        statusBadge.setText(GenerationRecord.statusLabel(r.status));
                         statusBadge.setTextColor(UiKit.MUTED);
                         statusBadge.setBackground(UiKit.round(ctx, 0xFFF1F3F5, 10));
                         break;
@@ -684,7 +704,7 @@ final class GalleryAdapters {
                 refBadge.setVisibility(r.hasRef ? View.VISIBLE : View.GONE);
 
                 if (r.durationMs > 0) {
-                    durationText.setText(String.format(Locale.ROOT, "耗时 %.1fs", r.durationMs / 1000.0f));
+                    durationText.setText(String.format(Locale.ROOT, "累计等待 %.1fs", r.durationMs / 1000.0f));
                     durationText.setVisibility(View.VISIBLE);
                 } else {
                     durationText.setVisibility(View.GONE);
@@ -692,8 +712,11 @@ final class GalleryAdapters {
 
                 promptText.setText(r.prompt);
 
-                if (r.status == GenerationRecord.STATUS_FAILED && !r.errorMessage.isEmpty()) {
-                    errorBox.setText("失败原因：" + r.errorMessage);
+                if (!GenerationRecord.isActive(r.status) && r.status != GenerationRecord.STATUS_SUCCESS && !r.errorMessage.isEmpty()) {
+                    boolean failed = r.status == GenerationRecord.STATUS_FAILED;
+                    errorBox.setText((failed ? "失败原因：" : "状态说明：") + r.errorMessage);
+                    errorBox.setTextColor(failed ? UiKit.DANGER : UiKit.MUTED);
+                    errorBox.setBackground(UiKit.round(ctx, failed ? UiKit.DANGER_SOFT : UiKit.SOFT, 8));
                     errorBox.setVisibility(View.VISIBLE);
                 } else {
                     errorBox.setVisibility(View.GONE);
@@ -726,8 +749,9 @@ final class GalleryAdapters {
                     secondaryActionIcon.setImageResource(R.drawable.ic_wand);
                     secondaryActionBtn.setOnClickListener(v -> listener.onRetry(r));
                 } else {
-                    primaryActionLabel.setText(r.status == GenerationRecord.STATUS_RUNNING ? "查看进度"
-                            : GenerationTasks.canResume(ctx, r.recordId) ? "继续获取" : "重新创作");
+                    primaryActionLabel.setText(GenerationRecord.isActive(r.status) ? "查看进度"
+                            : GenerationTasks.canResume(ctx, r.recordId) ? "继续获取"
+                            : r.status == GenerationRecord.STATUS_UNCONFIRMED ? "核对提示" : "重新创作");
                     primaryActionIcon.setImageResource(R.drawable.ic_refresh);
                     primaryActionBtn.setOnClickListener(v -> listener.onRetry(r));
 
@@ -736,8 +760,8 @@ final class GalleryAdapters {
                     secondaryActionBtn.setOnClickListener(v -> listener.onUsePrompt(r.prompt));
                 }
 
-                deleteBtn.setEnabled(r.status != GenerationRecord.STATUS_RUNNING);
-                deleteBtn.setAlpha(r.status == GenerationRecord.STATUS_RUNNING ? 0.35f : 1f);
+                deleteBtn.setEnabled(!GenerationRecord.isActive(r.status));
+                deleteBtn.setAlpha(GenerationRecord.isActive(r.status) ? 0.35f : 1f);
                 deleteBtn.setOnClickListener(v -> listener.onDeleteRecord(r.recordId));
                 card.setOnClickListener(v -> {
                     if (r.status == GenerationRecord.STATUS_SUCCESS && !r.resultImageId.isEmpty()) {

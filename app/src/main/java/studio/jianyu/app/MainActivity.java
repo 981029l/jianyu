@@ -129,14 +129,17 @@ public final class MainActivity extends Activity {
     // 后台生成计时器
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
     private TextView loadingTimerView;
+    private TextView loadingStatusView;
     private final Runnable genTimerTick = new Runnable() {
         @Override public void run() {
             int count = GenerationTasks.count();
             if (count == 0) return;
-            if (miniGenText != null) miniGenText.setText(count + " 条任务生成中 · 查看进度");
+            if (miniGenText != null) miniGenText.setText(count + " 条任务进行中 · 查看进度");
+            if (recordAdapter != null && activeTab == 3 && librarySubTab == 1) recordAdapter.refreshActiveStatuses();
             GenerationTasks.Task task = GenerationTasks.get(loadingRecordId);
+            if (loadingStatusView != null && task != null) loadingStatusView.setText(GenerationRecord.statusLabel(task.record.status));
             if (loadingTimerView != null && task != null) {
-                long sec = Math.max(1L, (System.currentTimeMillis() - task.startedAt) / 1000L);
+                long sec = Math.max(1L, (android.os.SystemClock.elapsedRealtime() - task.startedAt) / 1000L);
                 loadingTimerView.setText("已等待 " + sec + " 秒 · 完成后自动存入作品库");
             }
             uiHandler.postDelayed(this, 1000L);
@@ -629,7 +632,7 @@ public final class MainActivity extends Activity {
     private void popOverlay() {
         if (overlayStack.isEmpty()) return;
         OverlayEntry top = overlayStack.remove(overlayStack.size() - 1);
-        if ("loading".equals(top.tag)) loadingTimerView = null;
+        if ("loading".equals(top.tag)) { loadingTimerView = null; loadingStatusView = null; }
         updateFloatingBarsVisibility();
         MotionKit.animateOverlayPop(top.tag, top.view, () -> {
             overlayHost.removeView(top.view);
@@ -643,7 +646,7 @@ public final class MainActivity extends Activity {
             if (tag.equals(entry.tag)) {
                 overlayStack.remove(i);
                 overlayHost.removeView(entry.view);
-                if ("loading".equals(tag)) loadingTimerView = null;
+                if ("loading".equals(tag)) { loadingTimerView = null; loadingStatusView = null; }
             }
         }
         if (overlayStack.isEmpty()) overlayHost.setVisibility(View.GONE);
@@ -655,6 +658,7 @@ public final class MainActivity extends Activity {
         overlayHost.removeAllViews();
         overlayHost.setVisibility(View.GONE);
         loadingTimerView = null;
+        loadingStatusView = null;
         updateFloatingBarsVisibility();
     }
 
@@ -2241,6 +2245,17 @@ public final class MainActivity extends Activity {
             openLoadingOverlay(record.recordId);
             return;
         }
+        if (record.status == GenerationRecord.STATUS_UNCONFIRMED) {
+            new AlertDialog.Builder(this).setTitle("请先核对原任务")
+                    .setMessage("提交结果尚未确认，服务端可能已接收。请先核对任务与额度记录；填入描述不会立即重新提交。")
+                    .setNegativeButton("返回", null)
+                    .setPositiveButton("已核对，填入参数", (d, w) -> loadRecordParameters(record)).show();
+            return;
+        }
+        loadRecordParameters(record);
+    }
+
+    private void loadRecordParameters(GenerationRecord record) {
         nsfw = record.nsfw;
         selectedRoute = Math.max(0, Math.min(1, record.route));
         if (selectedRoute == 0) {
@@ -2381,7 +2396,7 @@ public final class MainActivity extends Activity {
         topBar.setGravity(Gravity.CENTER_VERTICAL);
         topBar.addView(UiKit.circleIconBtn(this, R.drawable.ic_back, UiKit.INK, UiKit.GLASS_STRONG, this::popOverlay),
                 new LinearLayout.LayoutParams(dp(44), dp(44)));
-        TextView title = UiKit.text(this, task.service.hasPending() ? "正在获取作品" : "正在创作", 16.5f, UiKit.INK, true);
+        TextView title = UiKit.text(this, "任务进度", 16.5f, UiKit.INK, true);
         title.setGravity(Gravity.CENTER);
         topBar.addView(title, new LinearLayout.LayoutParams(0, -2, 1));
         topBar.addView(new View(this), new LinearLayout.LayoutParams(dp(44), dp(1)));
@@ -2393,13 +2408,13 @@ public final class MainActivity extends Activity {
         AuroraOrbView orb = new AuroraOrbView(this);
         orbHolder.addView(orb, new LinearLayout.LayoutParams(dp(220), dp(220)));
 
-        TextView status = UiKit.text(this, "正在绘制画面…", 20, UiKit.INK, true);
+        loadingStatusView = UiKit.text(this, GenerationRecord.statusLabel(record.status), 20, UiKit.INK, true);
         LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
         slp.topMargin = dp(4);
-        orbHolder.addView(status, slp);
+        orbHolder.addView(loadingStatusView, slp);
 
-        long sec = Math.max(1L, (System.currentTimeMillis() - task.startedAt) / 1000L);
-        loadingTimerView = UiKit.text(this, "已等待 " + sec + " 秒 · 离开此页也会自动存入作品库", 13, UiKit.MUTED, false);
+        long sec = Math.max(1L, (android.os.SystemClock.elapsedRealtime() - task.startedAt) / 1000L);
+        loadingTimerView = UiKit.text(this, "已等待 " + sec + " 秒 · 完成后自动存入作品库", 13, UiKit.MUTED, false);
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(-2, -2);
         tlp.topMargin = dp(6);
         orbHolder.addView(loadingTimerView, tlp);
@@ -3336,6 +3351,7 @@ public final class MainActivity extends Activity {
         if (wasWatching) {
             activity.popOverlaysByTag("loading");
             activity.loadingTimerView = null;
+            activity.loadingStatusView = null;
         }
         if (GenerationTasks.count() == 0) activity.uiHandler.removeCallbacks(activity.genTimerTick);
         activity.refreshHomeDynamic();
@@ -3347,7 +3363,7 @@ public final class MainActivity extends Activity {
             else Toast.makeText(activity, "一条任务已完成，作品已保存", Toast.LENGTH_SHORT).show();
         } else if (error != null) {
             if (wasWatching) new AlertDialog.Builder(activity).setMessage(error).setPositiveButton("知道了", null).show();
-            else Toast.makeText(activity, "一条任务等待中断，可在生成记录中查看", Toast.LENGTH_SHORT).show();
+            else Toast.makeText(activity, GenerationTasks.canResume(activity, recordId) ? "一条任务已暂停等待，可在生成记录中继续获取" : "一条任务需要查看，请打开生成记录", Toast.LENGTH_SHORT).show();
         }
     }
 

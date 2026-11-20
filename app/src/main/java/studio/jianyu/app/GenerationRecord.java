@@ -12,6 +12,31 @@ public final class GenerationRecord {
     public static final int STATUS_SUCCESS = 1;
     public static final int STATUS_FAILED = 2;
     public static final int STATUS_CANCELLED = 3;
+    public static final int STATUS_SUBMITTING = 4;
+    public static final int STATUS_QUEUED = 5;
+    public static final int STATUS_DOWNLOADING = 6;
+    public static final int STATUS_WAITING = 7;
+    public static final int STATUS_UNCONFIRMED = 8;
+
+    public static boolean isActive(int status) {
+        return status == STATUS_RUNNING || status == STATUS_SUBMITTING
+                || status == STATUS_QUEUED || status == STATUS_DOWNLOADING;
+    }
+
+    public static String statusLabel(int status) {
+        switch (status) {
+            case STATUS_SUBMITTING: return "提交中";
+            case STATUS_QUEUED: return "服务端排队";
+            case STATUS_RUNNING: return "生成中";
+            case STATUS_DOWNLOADING: return "下载中";
+            case STATUS_WAITING: return "待继续获取";
+            case STATUS_UNCONFIRMED: return "待核对";
+            case STATUS_SUCCESS: return "绘制成功";
+            case STATUS_FAILED: return "绘制失败";
+            case STATUS_CANCELLED: return "已停止等待";
+            default: return "待核对";
+        }
+    }
 
     public final String recordId;
     public final long timestamp;
@@ -25,7 +50,7 @@ public final class GenerationRecord {
     public final String refUriStr;
     public final boolean nsfw;
 
-    public int status;
+    public volatile int status;
     public String resultImageId;
     public String errorMessage;
     public long durationMs;
@@ -130,7 +155,8 @@ public final class GenerationRecord {
             }
             for (int i = list.size() - 1; list.size() > MAX_RECORDS && i >= 0; i--) {
                 GenerationRecord older = list.get(i);
-                if (older.status != STATUS_RUNNING && !new ImageService(context, older.recordId).hasPending()) list.remove(i);
+                if (!isActive(older.status) && older.status != STATUS_UNCONFIRMED
+                        && !new ImageService(context, older.recordId).hasPending()) list.remove(i);
             }
             writeBack(context, list);
         }
@@ -154,7 +180,7 @@ public final class GenerationRecord {
         public static synchronized void deleteRecord(Context context, String recordId) {
             if (recordId == null) return;
             List<GenerationRecord> list = getAll(context);
-            list.removeIf(r -> recordId.equals(r.recordId) && r.status != STATUS_RUNNING);
+            list.removeIf(r -> recordId.equals(r.recordId) && !isActive(r.status));
             if (list.stream().noneMatch(r -> recordId.equals(r.recordId))) new ImageService(context, recordId).forget();
             writeBack(context, list);
         }
@@ -162,7 +188,7 @@ public final class GenerationRecord {
         public static synchronized void clearAll(Context context) {
             List<GenerationRecord> list = getAll(context);
             list.removeIf(r -> {
-                if (r.status == STATUS_RUNNING) return false;
+                if (isActive(r.status)) return false;
                 new ImageService(context, r.recordId).forget();
                 return true;
             });
