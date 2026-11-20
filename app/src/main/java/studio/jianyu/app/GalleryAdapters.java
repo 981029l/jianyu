@@ -551,13 +551,8 @@ final class GalleryAdapters {
                 UiKit.applySoftShadow(card, context, 3, 0x14182638);
 
                 // 1. 顶部状态与标签行
-                LinearLayout topRow = new LinearLayout(context);
-                topRow.setOrientation(LinearLayout.HORIZONTAL);
-                topRow.setGravity(Gravity.CENTER_VERTICAL);
-
-                LinearLayout tagsRow = new LinearLayout(context);
-                tagsRow.setOrientation(LinearLayout.HORIZONTAL);
-                tagsRow.setGravity(Gravity.CENTER_VERTICAL);
+                BadgeFlowLayout topRow = new BadgeFlowLayout(context);
+                BadgeFlowLayout tagsRow = new BadgeFlowLayout(context);
 
                 statusBadge = UiKit.softBadge(context, "成功", 0xFFE6F7ED, 0xFF1B8755);
                 routeBadge = UiKit.softBadge(context, "线路 1", 0xFFF0F4FA, UiKit.INK);
@@ -565,25 +560,20 @@ final class GalleryAdapters {
                 ratioBadge = UiKit.softBadge(context, "1:1", 0xFFF0F4FA, UiKit.MUTED);
                 refBadge = UiKit.softBadge(context, "图生图", 0xFFFFF4E5, 0xFFD97706);
 
-                tagsRow.addView(statusBadge);
-                LinearLayout.LayoutParams mlp1 = new LinearLayout.LayoutParams(-2, -2);
-                mlp1.leftMargin = UiKit.dp(context, 5);
-                tagsRow.addView(routeBadge, mlp1);
-                LinearLayout.LayoutParams mlp2 = new LinearLayout.LayoutParams(-2, -2);
-                mlp2.leftMargin = UiKit.dp(context, 5);
-                tagsRow.addView(modelBadge, mlp2);
-                LinearLayout.LayoutParams mlp3 = new LinearLayout.LayoutParams(-2, -2);
-                mlp3.leftMargin = UiKit.dp(context, 5);
-                tagsRow.addView(ratioBadge, mlp3);
-                LinearLayout.LayoutParams mlp4 = new LinearLayout.LayoutParams(-2, -2);
-                mlp4.leftMargin = UiKit.dp(context, 5);
-                tagsRow.addView(refBadge, mlp4);
-
-                topRow.addView(tagsRow, new LinearLayout.LayoutParams(0, -2, 1));
+                topRow.addView(statusBadge);
+                topRow.addView(routeBadge);
+                card.addView(topRow, new LinearLayout.LayoutParams(-1, -2));
+                tagsRow.addView(modelBadge);
+                tagsRow.addView(ratioBadge);
+                tagsRow.addView(refBadge);
+                LinearLayout.LayoutParams tagsLp = new LinearLayout.LayoutParams(-1, -2);
+                tagsLp.topMargin = UiKit.dp(context, 6);
+                card.addView(tagsRow, tagsLp);
 
                 durationText = UiKit.text(context, "", 11, UiKit.MUTED, false);
-                topRow.addView(durationText);
-                card.addView(topRow);
+                LinearLayout.LayoutParams durationLp = new LinearLayout.LayoutParams(-1, -2);
+                durationLp.topMargin = UiKit.dp(context, 6);
+                card.addView(durationText, durationLp);
 
                 // 2. 中间内容区（左侧提示词/错误，右侧缩略图）
                 LinearLayout midRow = new LinearLayout(context);
@@ -628,19 +618,17 @@ final class GalleryAdapters {
 
                 // 3. 底部操作栏
                 LinearLayout bottomRow = new LinearLayout(context);
-                bottomRow.setOrientation(LinearLayout.HORIZONTAL);
-                bottomRow.setGravity(Gravity.CENTER_VERTICAL);
+                bottomRow.setOrientation(LinearLayout.VERTICAL);
 
                 timeLabel = UiKit.text(context, "", 11, UiKit.MUTED, false);
-                bottomRow.addView(timeLabel, new LinearLayout.LayoutParams(0, -2, 1));
+                bottomRow.addView(timeLabel, new LinearLayout.LayoutParams(-1, -2));
 
-                LinearLayout actionRow = new LinearLayout(context);
-                actionRow.setOrientation(LinearLayout.HORIZONTAL);
-                actionRow.setGravity(Gravity.CENTER_VERTICAL);
+                BadgeFlowLayout actionRow = new BadgeFlowLayout(context, 8);
 
                 primaryActionBtn = new LinearLayout(context);
                 primaryActionBtn.setOrientation(LinearLayout.HORIZONTAL);
                 primaryActionBtn.setGravity(Gravity.CENTER_VERTICAL);
+                primaryActionBtn.setMinimumHeight(UiKit.dp(context, 48));
                 primaryActionBtn.setBackground(UiKit.floatingPillBg(context, 14));
                 primaryActionBtn.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 6), UiKit.dp(context, 10), UiKit.dp(context, 6));
                 primaryActionIcon = UiKit.icon(context, R.drawable.ic_sparkles, 13, UiKit.BLUE);
@@ -654,6 +642,7 @@ final class GalleryAdapters {
                 secondaryActionBtn = new LinearLayout(context);
                 secondaryActionBtn.setOrientation(LinearLayout.HORIZONTAL);
                 secondaryActionBtn.setGravity(Gravity.CENTER_VERTICAL);
+                secondaryActionBtn.setMinimumHeight(UiKit.dp(context, 48));
                 secondaryActionBtn.setBackground(UiKit.floatingPillBg(context, 14));
                 secondaryActionBtn.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 6), UiKit.dp(context, 10), UiKit.dp(context, 6));
                 secondaryActionIcon = UiKit.icon(context, R.drawable.ic_copy, 12, UiKit.MUTED);
@@ -662,16 +651,17 @@ final class GalleryAdapters {
                 LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-2, -2);
                 blp.leftMargin = UiKit.dp(context, 4);
                 secondaryActionBtn.addView(secondaryActionLabel, blp);
-                LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(-2, -2);
-                slp.leftMargin = UiKit.dp(context, 6);
-                actionRow.addView(secondaryActionBtn, slp);
+                actionRow.addView(secondaryActionBtn);
 
                 deleteBtn = UiKit.circleIconBtn(context, R.drawable.ic_trash, UiKit.MUTED, 0xFFF1F4F9, null);
-                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(UiKit.dp(context, 28), UiKit.dp(context, 28));
-                dlp.leftMargin = UiKit.dp(context, 8);
+                deleteBtn.setMinimumHeight(UiKit.dp(context, 48));
+                deleteBtn.setMinimumWidth(UiKit.dp(context, 48));
+                ViewGroup.LayoutParams dlp = new ViewGroup.LayoutParams(UiKit.dp(context, 48), UiKit.dp(context, 48));
                 actionRow.addView(deleteBtn, dlp);
 
-                bottomRow.addView(actionRow);
+                LinearLayout.LayoutParams actionsLp = new LinearLayout.LayoutParams(-1, -2);
+                actionsLp.topMargin = UiKit.dp(context, 8);
+                bottomRow.addView(actionRow, actionsLp);
                 card.addView(bottomRow);
             }
 

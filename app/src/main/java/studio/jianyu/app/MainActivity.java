@@ -45,6 +45,8 @@ public final class MainActivity extends Activity {
     private static final int SAVE_LOCAL_IMAGE = 1;
     private static final int PICK_REFERENCE = 2;
     private static final int SAVE_REMOTE_IMAGE = 3;
+    private static final int REQUEST_NOTIFICATIONS = 4;
+    private static final String KEY_NOTIFICATION_REQUESTED = "notification-requested";
     private static final int PLAZA_PAGE_SIZE = 24;
     private static final int GALLERY_PAGE_SIZE = 24;
 
@@ -103,6 +105,7 @@ public final class MainActivity extends Activity {
     private String promptMajor = "全部";
     private String promptQuery = "";
     private int promptVisibleCount = GALLERY_PAGE_SIZE;
+    private final PromptOrder<InspirationRepository.Item> promptOrder = new PromptOrder<>();
     private String builtPromptMajorsSignature = "";
 
     // 创意广场持久化控件 (Tab 2)
@@ -241,6 +244,20 @@ public final class MainActivity extends Activity {
         if (!autoCheckedUpdate) {
             autoCheckedUpdate = true;
             checkUpdate(true);
+        }
+        handleGenerationIntent(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleGenerationIntent(intent);
+    }
+
+    private void handleGenerationIntent(Intent intent) {
+        if (intent != null && intent.getBooleanExtra(GenerationService.SHOW_RECORDS, false)) {
+            intent.removeExtra(GenerationService.SHOW_RECORDS);
+            showGenerationRecords();
         }
     }
 
@@ -570,6 +587,12 @@ public final class MainActivity extends Activity {
 
     private void switchTab(int index) {
         hideKeyboard();
+        boolean enteringPrompts = index == 1 && activeTab != 1;
+        if (enteringPrompts) {
+            promptOrder.reset();
+            promptVisibleCount = GALLERY_PAGE_SIZE;
+            Collections.shuffle(discoverItems);
+        }
         if (activeTab == 3 && index != 3 && librarySelectMode) {
             exitLibrarySelectMode();
         }
@@ -588,7 +611,7 @@ public final class MainActivity extends Activity {
             }
         }
         if (index == 0) refreshHomeDynamic();
-        else if (index == 1) refreshPromptTab(false);
+        else if (index == 1) refreshPromptTab(enteringPrompts);
         else if (index == 2) refreshPlazaTab(false);
         else if (index == 3) refreshLibraryContent();
         updateFloatingBarsVisibility();
@@ -1481,6 +1504,8 @@ public final class MainActivity extends Activity {
         promptSwipe = new SwipeRefreshLayout(this);
         promptSwipe.setColorSchemeColors(UiKit.BLUE);
         promptSwipe.setOnRefreshListener(() -> {
+            promptOrder.reset();
+            promptVisibleCount = GALLERY_PAGE_SIZE;
             if (promptSourceIndex == 4) fetchDiscover(true);
             else fetchGallery(true);
         });
@@ -1526,8 +1551,7 @@ public final class MainActivity extends Activity {
                             fetchDiscover(false);
                         }
                     } else if (galleryData != null) {
-                        String st = promptSourceTag(promptSourceIndex);
-                        List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, st, promptMajor, promptQuery);
+                        List<InspirationRepository.Item> filtered = orderedPromptItems();
                         if (promptVisibleCount < filtered.size()) {
                             promptVisibleCount += GALLERY_PAGE_SIZE;
                             bindPromptToAdapter(filtered);
@@ -1636,10 +1660,9 @@ public final class MainActivity extends Activity {
         }
 
         rebuildPromptMajorChips();
-        String sourceTag = promptSourceTag(promptSourceIndex);
-        List<InspirationRepository.Item> filtered = InspirationRepository.filterGallery(galleryData, sourceTag, promptMajor, promptQuery);
+        List<InspirationRepository.Item> filtered = orderedPromptItems();
         String sourceName = promptSourceIndex == 1 ? "热榜图鉴" : (promptSourceIndex == 2 ? "设计精选" : (promptSourceIndex == 3 ? "经典画廊" : "全库"));
-        promptCountLabel.setText("共 " + filtered.size() + " 条" + sourceName + "提示词 · 离线秒开");
+        promptCountLabel.setText("共 " + filtered.size() + " 条" + sourceName + "提示词 · 随机展示");
         if (filtered.isEmpty()) {
             promptAdapter.setData(Collections.emptyList(), favoriteKeySet(), safeBrowse, "");
             String emptyMsg = (promptSourceIndex == 1 && galleryData != null && !galleryData.hotError.isEmpty())
@@ -1710,7 +1733,9 @@ public final class MainActivity extends Activity {
                     discoverPage = nextPage;
                     discoverHasMore = result.hasMore;
                     discoverFetchedKey = keySnap;
-                    discoverItems.addAll(result.items);
+                    List<InspirationRepository.Item> page = new ArrayList<>(result.items);
+                    Collections.shuffle(page);
+                    discoverItems.addAll(page);
                     MainActivity act = visible;
                     if (act != null) {
                         if (act.promptSwipe != null) act.promptSwipe.setRefreshing(false);
@@ -1730,6 +1755,13 @@ public final class MainActivity extends Activity {
                 });
             }
         }, "jianyu-discover").start();
+    }
+
+    private List<InspirationRepository.Item> orderedPromptItems() {
+        String tag = promptSourceTag(promptSourceIndex);
+        String key = tag + "\n" + promptMajor + "\n" + promptQuery;
+        return promptOrder.get(galleryData, key,
+                () -> InspirationRepository.filterGallery(galleryData, tag, promptMajor, promptQuery));
     }
 
     private void bindPromptToAdapter(List<InspirationRepository.Item> filtered) {
@@ -2239,7 +2271,7 @@ public final class MainActivity extends Activity {
             return;
         }
         if (GenerationTasks.canResume(this, record.recordId)) {
-            GenerationTasks.start(this, record, MainActivity::finished);
+            if (!GenerationTasks.start(this, record, MainActivity::finished)) return;
             startGenTimer();
             refreshHomeDynamic();
             refreshLibraryContent();
@@ -3222,11 +3254,18 @@ public final class MainActivity extends Activity {
         Context appContext = getApplicationContext();
         new Thread(() -> {
             try {
-                File apk = UpdateManager.downloadApk(appContext, info.downloadUrl, percent ->
+                File apk = UpdateManager.downloadApk(appContext, info, new UpdateManager.ProgressListener() {
+                    @Override public void onProgress(int percent) {
                         uiHandler.post(() -> {
-                            bar.setProgress(percent);
-                            progPct.setText(percent + "%");
-                        }));
+                            bar.setIndeterminate(percent < 0);
+                            if (percent >= 0) bar.setProgress(percent);
+                            progPct.setText(percent < 0 ? "下载中" : percent + "%");
+                        });
+                    }
+                    @Override public void onChannelChanged(String channel) {
+                        uiHandler.post(() -> progLabel.setText("正在使用" + channel + "下载更新…"));
+                    }
+                });
                 uiHandler.post(() -> {
                     if (dialog.isShowing()) dialog.dismiss();
                     MainActivity activity = visible;
@@ -3331,7 +3370,15 @@ public final class MainActivity extends Activity {
                 selectedRoute, routes[selectedRoute], activeModelDisplayName(), wireModel, ratios[ratio], input,
                 reference != null, reference != null ? reference.toString() : "", isGrok() && nsfw,
                 GenerationRecord.STATUS_RUNNING, "", "", 0L);
-        GenerationTasks.start(this, record, MainActivity::finished);
+        if (!GenerationTasks.start(this, record, MainActivity::finished)) return;
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
+            if (!prefs.getBoolean(KEY_NOTIFICATION_REQUESTED, false)) {
+                prefs.edit().putBoolean(KEY_NOTIFICATION_REQUESTED, true).apply();
+                requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
+            }
+        }
         draft = "";
         if (promptInput != null) promptInput.setText("");
         startGenTimer();
@@ -3346,7 +3393,7 @@ public final class MainActivity extends Activity {
         uiHandler.post(genTimerTick);
     }
 
-    private static void finished(String recordId, String id, String error, boolean wasCancelled) {
+    static void finished(String recordId, String id, String error, boolean wasCancelled) {
         MainActivity activity = visible;
         if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
         boolean wasWatching = activity.isOverlayOpen("loading") && recordId.equals(activity.loadingRecordId);

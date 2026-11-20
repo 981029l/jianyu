@@ -2,9 +2,13 @@ package studio.jianyu.app;
 
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.provider.Settings;
 import android.widget.Toast;
 import androidx.core.content.FileProvider;
@@ -14,6 +18,10 @@ import java.io.*;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.Timer;
+import java.util.TimerTask;
 import javax.net.ssl.HttpsURLConnection;
 
 final class UpdateManager {
@@ -29,6 +37,11 @@ final class UpdateManager {
     private static final String MIRROR_PREFIX = "https://ghfast.top/";
     private static final int JSON_LIMIT = 256 * 1024;
     private static final int APK_LIMIT = 100 * 1024 * 1024;
+    static final int CONNECT_TIMEOUT_MS = 6000;
+    static final int READ_TIMEOUT_MS = 15000;
+    static final int JSON_TIMEOUT_MS = 15000;
+    static final int APK_TIMEOUT_MS = 2 * 60 * 1000;
+    static final int MAX_REDIRECTS = 5;
 
     static final class UpdateInfo {
         final boolean hasUpdate;
@@ -51,10 +64,13 @@ final class UpdateManager {
 
     interface ProgressListener {
         void onProgress(int percent);
+        default void onChannelChanged(String channel) { }
     }
 
-    private static HttpsURLConnection open(URL url, int connectMs, int readMs, boolean followRedirects) throws IOException {
-        if (!"https".equals(url.getProtocol())) throw new IOException("仅支持 HTTPS 下载地址。");
+    static long nowMillis() { return SystemClock.elapsedRealtime(); }
+
+    static HttpsURLConnection open(URL url, int connectMs, int readMs, boolean followRedirects) throws IOException {
+        if (!"https".equals(url.getProtocol()) || url.getUserInfo() != null) throw new IOException("仅支持 HTTPS 下载地址。");
         HttpsURLConnection conn = (HttpsURLConnection) url.openConnection();
         conn.setInstanceFollowRedirects(followRedirects);
         conn.setConnectTimeout(connectMs);
@@ -65,13 +81,15 @@ final class UpdateManager {
 
     private static String fetchText(String address, String accept) throws IOException {
         URL target = new URL(address);
-        for (int i = 0; i < 5; i++) {
-            HttpsURLConnection conn = open(target, 10000, 15000, false);
+        try (Transfer transfer = new Transfer(JSON_TIMEOUT_MS)) {
+        for (int i = 0; i < MAX_REDIRECTS; i++) {
+            HttpsURLConnection conn = transfer.open(target);
             try {
                 conn.setRequestProperty("Cache-Control", "no-cache, no-store, must-revalidate");
                 conn.setRequestProperty("Pragma", "no-cache");
                 if (accept != null) conn.setRequestProperty("Accept", accept);
                 int status = conn.getResponseCode();
+                transfer.check();
                 if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
                     target = new URL(target, conn.getHeaderField("Location"));
                     continue;
@@ -79,10 +97,16 @@ final class UpdateManager {
                 if (status < 200 || status >= 300) throw new IOException("HTTP " + status);
                 try (InputStream in = conn.getInputStream();
                      ByteArrayOutputStream out = new ByteArrayOutputStream()) {
-                    ImageService.copy(in, out, JSON_LIMIT, "版本信息过大。");
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = transfer.read(in, buffer)) != -1) {
+                        if (out.size() + count > JSON_LIMIT) throw new IOException("版本信息过大。");
+                        out.write(buffer, 0, count);
+                    }
                     return new String(out.toByteArray(), StandardCharsets.UTF_8);
                 }
-            } finally { conn.disconnect(); }
+            } finally { transfer.release(conn); }
+        }
         }
         throw new IOException("重定向过多。");
     }
@@ -94,8 +118,14 @@ final class UpdateManager {
         UpdateInfo cdn = null, raw = null, probe = null, api = null;
 
         try {
-            cdn = checkViaVersionJson(CDN_VERSION_JSON, currentCode, currentVersion);
+            cdn = checkViaVersionJson(MIRROR_PREFIX + RAW_VERSION_JSON, currentCode, currentVersion);
             if (cdn.hasUpdate) return cdn;
+        } catch (IOException e) { lastError = e; }
+
+        try {
+            UpdateInfo fallback = checkViaVersionJson(CDN_VERSION_JSON, currentCode, currentVersion);
+            if (fallback.hasUpdate) return fallback;
+            if (cdn == null) cdn = fallback;
         } catch (IOException e) { lastError = e; }
 
         try {
@@ -147,7 +177,7 @@ final class UpdateManager {
     }
 
     private static UpdateInfo checkViaWebRedirect(String url, String currentVersion) throws IOException {
-        HttpsURLConnection conn = open(new URL(url), 10000, 10000, false);
+        HttpsURLConnection conn = open(new URL(url), CONNECT_TIMEOUT_MS, READ_TIMEOUT_MS, false);
         try {
             conn.setRequestMethod("HEAD");
             conn.getResponseCode();
@@ -195,7 +225,7 @@ final class UpdateManager {
         }
     }
 
-    static File downloadApk(Context context, String downloadUrl, ProgressListener listener) throws IOException {
+    static File downloadApk(Context context, UpdateInfo info, ProgressListener listener) throws IOException {
         File destDir = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
         if (destDir == null) destDir = context.getFilesDir();
         if (!destDir.isDirectory() && !destDir.mkdirs()) throw new IOException("无法创建下载目录。");
@@ -204,16 +234,22 @@ final class UpdateManager {
         if (tempFile.exists()) tempFile.delete();
         if (targetFile.exists()) targetFile.delete();
 
-        String[] candidates = new String[]{downloadUrl, MIRROR_PREFIX + downloadUrl};
+        String[] candidates = downloadCandidates(info.downloadUrl);
         IOException lastError = null;
         for (String candidate : candidates) {
             try {
-                downloadToFile(candidate, tempFile, listener);
-                if (isValidApkFile(tempFile)) {
-                    if (targetFile.exists()) targetFile.delete();
-                    return tempFile.renameTo(targetFile) ? targetFile : tempFile;
+                if (listener != null) {
+                    listener.onChannelChanged(candidate.startsWith(MIRROR_PREFIX) ? "加速通道" : "直连通道");
+                    listener.onProgress(0);
                 }
-                throw new IOException("下载文件校验失败，不是有效的 APK 安装包。");
+                downloadToFile(candidate, tempFile, listener);
+                if (isValidApkFile(context, tempFile, info)) {
+                    if (targetFile.exists()) targetFile.delete();
+                    File result = tempFile.renameTo(targetFile) ? targetFile : tempFile;
+                    if (listener != null) listener.onProgress(100);
+                    return result;
+                }
+                throw new IOException("安装包不完整，或包名、版本、签名与预期不匹配。");
             } catch (IOException e) {
                 lastError = e;
                 if (tempFile.exists()) tempFile.delete();
@@ -222,52 +258,130 @@ final class UpdateManager {
         throw lastError != null ? lastError : new IOException("APK 下载失败，请检查网络连接。");
     }
 
-    private static void downloadToFile(String address, File dest, ProgressListener listener) throws IOException {
+    static String[] downloadCandidates(String url) throws IOException {
+        URL target = new URL(url);
+        if (!"https".equals(target.getProtocol()) || target.getUserInfo() != null) throw new IOException("更新地址无效。");
+        return "github.com".equalsIgnoreCase(target.getHost())
+                ? new String[]{MIRROR_PREFIX + url, url} : new String[]{url};
+    }
+
+    static void downloadToFile(String address, File dest, ProgressListener listener) throws IOException {
         URL target = new URL(address);
-        for (int redirects = 0; redirects < 5; redirects++) {
-            HttpsURLConnection conn = open(target, 15000, 60000, false);
+        try (Transfer transfer = new Transfer(APK_TIMEOUT_MS)) {
+        for (int redirects = 0; redirects < MAX_REDIRECTS; redirects++) {
+            HttpsURLConnection conn = transfer.open(target);
             try {
+                conn.setRequestProperty("Accept-Encoding", "identity");
                 int status = conn.getResponseCode();
+                transfer.check();
                 if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
                     target = new URL(target, conn.getHeaderField("Location"));
                     continue;
                 }
                 if (status != 200) throw new IOException("下载通道响应异常（HTTP " + status + "）");
                 long total = conn.getContentLengthLong();
+                if (total > APK_LIMIT) throw new IOException("安装包体积异常。");
+                if (total <= 0 && listener != null) listener.onProgress(-1);
                 try (InputStream in = conn.getInputStream();
                      OutputStream out = new FileOutputStream(dest)) {
                     byte[] buffer = new byte[16384];
                     long received = 0;
                     int lastPercent = -1;
                     int count;
-                    while ((count = in.read(buffer)) != -1) {
+                    while ((count = transfer.read(in, buffer)) != -1) {
                         received += count;
                         if (received > APK_LIMIT) throw new IOException("安装包体积异常。");
                         out.write(buffer, 0, count);
                         if (total > 0 && listener != null) {
-                            int percent = (int) Math.min(100, Math.max(0, (received * 100) / total));
+                            int percent = (int) Math.min(99, Math.max(0, (received * 100) / total));
                             if (percent != lastPercent) {
                                 lastPercent = percent;
                                 listener.onProgress(percent);
                             }
                         }
                     }
+                    if (total > 0 && received != total) throw new IOException("安装包下载不完整。");
                     out.flush();
                 }
-                if (listener != null) listener.onProgress(100);
                 return;
-            } finally { conn.disconnect(); }
+            } finally { transfer.release(conn); }
+        }
         }
         throw new IOException("下载地址重定向过多。");
     }
 
-    private static boolean isValidApkFile(File file) {
+    static boolean isValidApkFile(Context context, File file, UpdateInfo expected) {
         if (!file.isFile() || file.length() < 1024) return false;
-        try (InputStream in = new FileInputStream(file)) {
-            return in.read() == 0x50 && in.read() == 0x4B;
-        } catch (IOException e) {
+        try {
+            PackageManager manager = context.getPackageManager();
+            int flags = Build.VERSION.SDK_INT >= 28 ? PackageManager.GET_SIGNING_CERTIFICATES : PackageManager.GET_SIGNATURES;
+            PackageInfo apk = manager.getPackageArchiveInfo(file.getPath(), flags);
+            PackageInfo installed = manager.getPackageInfo(context.getPackageName(), flags);
+            if (apk == null || !context.getPackageName().equals(apk.packageName)) return false;
+            long code = Build.VERSION.SDK_INT >= 28 ? apk.getLongVersionCode() : apk.versionCode;
+            if (code <= BuildConfig.VERSION_CODE || (expected.latestCode > 0 && code != expected.latestCode)
+                    || !cleanVersion(expected.latestVersion).equals(cleanVersion(apk.versionName))) return false;
+            Signature[] current = signatures(installed);
+            Signature[] update = signatures(apk);
+            return current != null && update != null && current.length > 0
+                    && new HashSet<>(Arrays.asList(current)).equals(new HashSet<>(Arrays.asList(update)));
+        } catch (PackageManager.NameNotFoundException | RuntimeException e) {
             return false;
         }
+    }
+
+    private static Signature[] signatures(PackageInfo info) {
+        return Build.VERSION.SDK_INT >= 28 && info.signingInfo != null ? info.signingInfo.getApkContentsSigners() : info.signatures;
+    }
+
+    private static final class Transfer implements AutoCloseable {
+        private final long deadline;
+        private final Timer timer = new Timer("jianyu-update-timeout", true);
+        private volatile HttpsURLConnection active;
+        private volatile boolean expired;
+
+        Transfer(int timeoutMs) {
+            deadline = nowMillis() + timeoutMs;
+            timer.schedule(new TimerTask() {
+                @Override public void run() {
+                    expired = true;
+                    HttpsURLConnection conn = active;
+                    if (conn != null) {
+                        Thread thread = new Thread(conn::disconnect, "jianyu-update-disconnect");
+                        thread.setDaemon(true);
+                        thread.start();
+                    }
+                }
+            }, timeoutMs);
+        }
+
+        void check() throws IOException {
+            if (expired || nowMillis() >= deadline) throw new IOException("当前下载通道超时，请切换线路或稍后重试。");
+        }
+
+        private int remaining(int maximum) throws IOException {
+            check();
+            return (int) Math.max(1, Math.min(maximum, deadline - nowMillis()));
+        }
+
+        HttpsURLConnection open(URL url) throws IOException {
+            active = UpdateManager.open(url, remaining(CONNECT_TIMEOUT_MS), remaining(READ_TIMEOUT_MS), false);
+            return active;
+        }
+
+        int read(InputStream input, byte[] buffer) throws IOException {
+            active.setReadTimeout(remaining(READ_TIMEOUT_MS));
+            int count = input.read(buffer);
+            check();
+            return count;
+        }
+
+        void release(HttpsURLConnection conn) {
+            if (active == conn) active = null;
+            conn.disconnect();
+        }
+
+        @Override public void close() { timer.cancel(); }
     }
 
     static boolean installApk(Context context, File apkFile) {

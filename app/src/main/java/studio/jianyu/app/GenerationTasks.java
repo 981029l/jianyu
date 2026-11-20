@@ -19,11 +19,13 @@ final class GenerationTasks {
     static final class Task {
         final GenerationRecord record;
         final ImageService service;
+        final Context context;
         final long startedAt = SystemClock.elapsedRealtime();
 
-        Task(GenerationRecord record, ImageService service) {
+        Task(GenerationRecord record, ImageService service, Context context) {
             this.record = record;
             this.service = service;
+            this.context = context;
         }
     }
 
@@ -45,8 +47,14 @@ final class GenerationTasks {
         return count;
     }
 
-    static void start(Context context, GenerationRecord record, Listener listener) {
+    static boolean start(Context context, GenerationRecord record, Listener listener) {
+        try { GenerationService.ensureRunning(context); }
+        catch (RuntimeException error) {
+            android.widget.Toast.makeText(context, "无法启动后台绘图服务，请保持应用打开后重试。", android.widget.Toast.LENGTH_LONG).show();
+            return false;
+        }
         start(context, record, new ImageService(context, record.recordId), listener);
+        return true;
     }
 
     static synchronized void start(Context context, GenerationRecord record, ImageService service, Listener listener) {
@@ -55,19 +63,35 @@ final class GenerationTasks {
         record.status = service.hasPending() ? GenerationRecord.STATUS_RUNNING : GenerationRecord.STATUS_SUBMITTING;
         record.errorMessage = "";
         GenerationRecord.Repository.saveRecord(app, record);
-        Task task = new Task(record, service);
+        Task task = new Task(record, service, app);
         active.put(record.recordId, task);
         service.setProgressListener(status -> {
-            if (record.status == status) return;
+            if (service.isCancelled() || record.status == status) return;
             record.status = status;
             GenerationRecord.Repository.updateStatus(app, record.recordId, status, null, "", record.durationMs);
+            GenerationService.taskChanged();
         });
         new Thread(() -> execute(app, task, listener), "jianyu-image-" + record.recordId).start();
     }
 
     static synchronized void cancel(String recordId) {
         Task task = active.get(recordId);
-        if (task != null) task.service.cancelActive();
+        if (task != null) stopTask(task);
+    }
+
+    static synchronized void cancelAll() {
+        for (Task task : active.values()) stopTask(task);
+    }
+
+    private static void stopTask(Task task) {
+        task.service.cancelActive();
+        boolean pending = task.service.hasPending();
+        boolean unconfirmed = task.service.isSubmissionUnconfirmed();
+        int status = pending ? GenerationRecord.STATUS_WAITING : unconfirmed ? GenerationRecord.STATUS_UNCONFIRMED : GenerationRecord.STATUS_CANCELLED;
+        task.record.status = status;
+        GenerationRecord.Repository.updateStatus(task.context, task.record.recordId, status, null,
+                pending ? "已停止本机等待，原任务已保留，可继续获取。" : unconfirmed ? "提交结果尚未确认，请核对服务端记录。" : "已停止本机等待。",
+                task.record.durationMs + Math.max(0, SystemClock.elapsedRealtime() - task.startedAt));
     }
 
     private static void execute(Context app, Task task, Listener listener) {
@@ -98,6 +122,7 @@ final class GenerationTasks {
         GenerationRecord.Repository.updateStatus(app, record.recordId, status, imageId,
                 cancelled && !resumable && !unconfirmed ? "已停止等待，未向服务端发送取消指令。" : error, duration);
         synchronized (GenerationTasks.class) { active.remove(record.recordId); }
+        GenerationService.taskFinished(record.recordId, imageId, error, cancelled);
         String result = imageId;
         String message = error;
         new Handler(Looper.getMainLooper()).post(() -> listener.onFinished(record.recordId, result, message, cancelled));
