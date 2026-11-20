@@ -114,12 +114,12 @@ public class ImageServicePollingTest {
         HttpsURLConnection download = mock(HttpsURLConnection.class);
         when(download.getResponseCode()).thenThrow(new SocketTimeoutException());
         doReturn(submit, running, complete, download).when(service).connect(any(URL.class), anyInt());
-        assertThrows(SocketTimeoutException.class, () -> service.run("海边灯塔", "image-1", "1:1", null, false));
+        assertThrows(IOException.class, () -> service.run("海边灯塔", "image-1", "1:1", null, false));
         assertEquals(Arrays.asList(GenerationRecord.STATUS_SUBMITTING, GenerationRecord.STATUS_QUEUED,
                 GenerationRecord.STATUS_RUNNING, GenerationRecord.STATUS_DOWNLOADING), stages);
         assertTrue(service.hasPending());
         assertEquals("https://example.test/image.png", context.getSharedPreferences(ImageService.PENDING_PREFS + "-" + id, 0).getString("url", ""));
-        verify(service).connect(argThat(url -> url.toString().equals("https://example.test/image.png")), anyInt());
+        verify(service, times(GenerationDownload.MAX_RETRIES + 1)).connect(argThat(url -> url.toString().equals("https://example.test/image.png")), anyInt());
     }
 
     @Test public void lineTwoRetainsOriginalIdAcrossRateLimitAndMissingId() throws Exception {
@@ -166,8 +166,9 @@ public class ImageServicePollingTest {
         HttpsURLConnection download = mock(HttpsURLConnection.class);
         when(download.getResponseCode()).thenThrow(new SocketTimeoutException());
         doReturn(download).when(service).connect(any(URL.class), anyInt());
-        assertThrows(SocketTimeoutException.class, () -> service.run("继续下载", "image-1", "1:1", null, false));
-        verify(service).connect(argThat(url -> url.toString().equals("https://example.test/saved.png")), anyInt());
+        IOException error = assertThrows(IOException.class, () -> service.run("继续下载", "image-1", "1:1", null, false));
+        assertTrue(error.getMessage().contains("自动重连 3 次"));
+        verify(service, times(GenerationDownload.MAX_RETRIES + 1)).connect(argThat(url -> url.toString().equals("https://example.test/saved.png")), anyInt());
         verify(download, never()).setRequestMethod("POST");
         assertTrue(service.hasPending());
     }
@@ -325,7 +326,8 @@ public class ImageServicePollingTest {
         };
         HttpsURLConnection download = imageResponse(timeout, 2048);
         doReturn(download).when(service).connect(any(URL.class), anyInt());
-        assertThrows(SocketTimeoutException.class, () -> service.run("停滞下载", "gpt-image-2.5", "1:1", null, false));
+        IOException error = assertThrows(IOException.class, () -> service.run("停滞下载", "gpt-image-2.5", "1:1", null, false));
+        assertTrue(error.getMessage().contains("自动重连 3 次"));
         verify(download, atLeastOnce()).setReadTimeout(90000);
         assertRetainedDownload();
         assertNoTemporaryImages();

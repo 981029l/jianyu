@@ -1,6 +1,6 @@
 {
-  "versionCode": 21,
-  "versionName": "0.8.12",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.12/Jianyu-v0.8.12.apk",
-  "releaseNotes": "1. 取消图片下载的 3 分钟总时限，持续传输的图片可继续下载，避免下载到 90% 后被定时中断。\n2. 保留连接与连续读取等待超时、取消等待及图片完整性校验，适用于线路 1、线路 2 和网关图片下载。"
+  "versionCode": 22,
+  "versionName": "0.8.13",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.13/Jianyu-v0.8.13.apk",
+  "releaseNotes": "1. 地址图片下载遇到断网、读取停滞或临时服务错误时，自动重连最多 3 次，显示重连及实际下载进度。\n2. 服务端支持文件版本校验与 Range 时，从已下载位置继续；停止等待或重新打开应用后仍可恢复，成功保存或删除记录时清理缓存。\n3. 保持取消 3 分钟下载总时限，保留单次读取等待 90 秒；不支持安全续传时完整重下，不重复提交生图请求。\n4. 本次为客户端重连与续传优化，未接入大陆 CDN，不保证原图片服务器带宽提速。"
 }

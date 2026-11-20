@@ -6,10 +6,20 @@ import java.util.Locale;
 final class GenerationDownload {
     static final int READ_TIMEOUT_MS = 90000;
     static final int MAX_REDIRECTS = 5;
+    static final int MAX_RETRIES = 3;
+    static final int RETRY_DELAY_MS = 2000;
     private volatile long received;
     private volatile long total = -1;
+    private volatile String phase = "";
+
+    static final class RetryException extends IOException {
+        RetryException(String message) { super(message); }
+        RetryException(String message, IOException cause) { super(message, cause); }
+    }
 
     void setTotal(long bytes) { total = bytes > 0 ? bytes : -1; }
+    void setReceived(long bytes) { received = bytes; }
+    void setPhase(String text) { phase = text; }
     void addBytes(int bytes) { if (bytes > 0) received += bytes; }
 
     void finish() throws IOException {
@@ -19,9 +29,9 @@ final class GenerationDownload {
     String progressLabel() {
         long bytes = received;
         long size = total;
-        if (bytes == 0 && size <= 0) return "正在连接图片服务器…";
+        if (bytes == 0 && size <= 0) return phase + "正在连接图片服务器…";
         String text = "已下载 " + formatBytes(bytes);
-        return size > 0 ? text + " / " + formatBytes(size) + " · " + Math.min(100, bytes * 100 / size) + "%" : text;
+        return phase + (size > 0 ? text + " / " + formatBytes(size) + " · " + Math.min(100, bytes * 100 / size) + "%" : text);
     }
 
     private static String formatBytes(long bytes) {

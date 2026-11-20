@@ -48,6 +48,7 @@ final class ImageService {
     private final Context context;
     private final SharedPreferences pending;
     private final SharedPreferences config;
+    private final DownloadCheckpoint checkpoint;
     private volatile boolean cancelled;
     private volatile HttpsURLConnection activeConn;
     private final Object waitLock = new Object();
@@ -79,10 +80,15 @@ final class ImageService {
         String name = PENDING_PREFS + (recordId.isEmpty() ? "" : "-" + recordId);
         pending = this.context.getSharedPreferences(name, Context.MODE_PRIVATE);
         config = this.context.getSharedPreferences("config", Context.MODE_PRIVATE);
+        checkpoint = new DownloadCheckpoint(new File(new File(this.context.getFilesDir(), "image-downloads"),
+                UUID.nameUUIDFromBytes(name.getBytes(StandardCharsets.UTF_8)) + ".part"), pending);
     }
 
     boolean hasPending() { return pending.contains("task") || pending.contains("url"); }
-    void forget() { pending.edit().clear().commit(); }
+    void forget() {
+        pending.edit().clear().commit();
+        if (checkpoint.file.exists()) checkpoint.file.delete();
+    }
 
     boolean isCancelled() { return cancelled; }
     void cancelActive() {
@@ -982,21 +988,65 @@ final class ImageService {
 
     private String download(String address, String prompt, String meta) throws IOException {
         GenerationDownload progress = beginDownload();
+        checkpoint.prepare(address);
+        for (int attempt = 0; ; attempt++) {
+            checkDownload();
+            if (checkpoint.complete()) {
+                progress.setReceived(checkpoint.file.length());
+                progress.setTotal(checkpoint.total());
+                return saveCompletedDownload(prompt, meta);
+            }
+            if (!checkpoint.resumable()) checkpoint.reset();
+            long offset = checkpoint.file.length();
+            progress.setReceived(offset);
+            progress.setTotal(checkpoint.total());
+            if (offset > 0) progress.setPhase("断点续传 · ");
+            try { return downloadAttempt(address, offset, progress, prompt, meta); }
+            catch (GenerationDownload.RetryException error) {
+                checkDownload();
+                if (!checkpoint.resumable()) checkpoint.reset();
+                if (attempt >= GenerationDownload.MAX_RETRIES)
+                    throw new IOException("图片下载已自动重连 " + GenerationDownload.MAX_RETRIES + " 次，仍未完成，请继续获取。" + error.getMessage(), error);
+                progress.setPhase("自动重连 " + (attempt + 1) + "/" + GenerationDownload.MAX_RETRIES + " · ");
+                waitForPoll((long) GenerationDownload.RETRY_DELAY_MS << attempt);
+            }
+        }
+    }
+
+    private String downloadAttempt(String address, long offset, GenerationDownload progress, String prompt, String meta) throws IOException {
         URL target = new URL(address);
         for (int redirects = 0; redirects < GenerationDownload.MAX_REDIRECTS; redirects++) {
             checkDownload();
-            HttpsURLConnection conn = openTracked(target, GenerationDownload.READ_TIMEOUT_MS);
+            if (!"https".equals(target.getProtocol()) || target.getUserInfo() != null) throw new IOException("图片地址须使用 HTTPS。");
+            HttpsURLConnection conn;
+            try { conn = openTracked(target, GenerationDownload.READ_TIMEOUT_MS); }
+            catch (IOException error) { throw new GenerationDownload.RetryException("图片服务器连接中断。", error); }
             try {
                 conn.setRequestProperty("Accept-Encoding", "identity");
-                int status = conn.getResponseCode();
+                conn.setRequestProperty("User-Agent", "Jianyu-Android/" + BuildConfig.VERSION_NAME);
+                checkpoint.requestRange(conn, offset);
+                int status;
+                try { status = conn.getResponseCode(); }
+                catch (IOException error) { throw new GenerationDownload.RetryException("图片服务器连接中断。", error); }
                 checkDownload();
                 if (status >= 300 && status < 400 && conn.getHeaderField("Location") != null) {
                     target = new URL(target, conn.getHeaderField("Location"));
                     continue;
                 }
-                if (status != 200) throw new IOException("图片已生成，但下载失败（HTTP " + status + "），请在生成记录中继续获取。");
-                return saveDownload(conn, progress, prompt, meta);
+                if (status == 416 && offset > 0) {
+                    checkpoint.reset();
+                    throw new GenerationDownload.RetryException("续传位置已失效，正在重新完整下载。");
+                }
+                if (isRetryableStatus(status))
+                    throw new GenerationDownload.RetryException("图片服务器暂时不可用（HTTP " + status + "）。");
+                if (status != 200 && status != 206) throw new IOException("图片已生成，但下载失败（HTTP " + status + "），请在生成记录中继续获取。");
+                long end = checkpoint.accept(conn, status, offset);
+                if (status == 200) offset = 0;
+                progress.setReceived(offset);
+                progress.setTotal(checkpoint.total());
+                return saveResumableDownload(conn, offset, end, progress, prompt, meta);
             } catch (IOException error) {
+                if (cancelled && !checkpoint.resumable() && !checkpoint.complete()) checkpoint.reset();
                 checkDownload();
                 throw error;
             } finally {
@@ -1005,6 +1055,38 @@ final class ImageService {
             }
         }
         throw new IOException("图片下载地址重定向过多。");
+    }
+
+    private String saveResumableDownload(HttpsURLConnection conn, long offset, long end, GenerationDownload progress, String prompt, String meta) throws IOException {
+        InputStream body;
+        try { body = conn.getInputStream(); }
+        catch (IOException error) { throw new GenerationDownload.RetryException("图片读取中断。", error); }
+        try (InputStream in = body; OutputStream out = new FileOutputStream(checkpoint.file, offset > 0)) {
+            byte[] buffer = new byte[16384];
+            long received = offset;
+            while (end < 0 || received < end) {
+                checkDownload();
+                conn.setReadTimeout(GenerationDownload.READ_TIMEOUT_MS);
+                int count;
+                try { count = in.read(buffer, 0, (int) Math.min(buffer.length, end < 0 ? buffer.length : end - received)); }
+                catch (IOException error) { throw new GenerationDownload.RetryException("图片读取中断。", error); }
+                if (count == -1) break;
+                received += count;
+                if (received > IMAGE_LIMIT) { checkpoint.reset(); throw new IOException("图片超过 24 MiB。"); }
+                out.write(buffer, 0, count);
+                progress.addBytes(count);
+                checkDownload();
+            }
+        }
+        if ((end >= 0 && checkpoint.file.length() != end) || (checkpoint.total() > 0 && checkpoint.file.length() != checkpoint.total()))
+            throw new GenerationDownload.RetryException("图片下载不完整。");
+        progress.finish();
+        return saveCompletedDownload(prompt, meta);
+    }
+
+    private String saveCompletedDownload(String prompt, String meta) throws IOException {
+        checkDownload();
+        return saveFile(checkpoint.file, prompt, meta);
     }
 
     private GenerationDownload beginDownload() {
@@ -1052,20 +1134,29 @@ final class ImageService {
         File tmp = File.createTempFile("pending-", ".tmp", dir);
         try {
             try (OutputStream out = new FileOutputStream(tmp)) { copy(in, out, IMAGE_LIMIT, "图片超过 24 MiB。"); }
-            BitmapFactory.Options info = new BitmapFactory.Options();
-            info.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(tmp.getPath(), info);
-            String ext = extension(info);
-            if (ext == null) throw new IOException("结果不是支持的图片格式。");
-            String id = System.currentTimeMillis() + "-" + UUID.randomUUID() + "." + ext;
-            if (!tmp.renameTo(new File(dir, id))) throw new IOException("作品保存失败。");
-            context.getSharedPreferences("art", Context.MODE_PRIVATE).edit().putString(id, prompt).apply();
-            if (meta != null && !meta.isEmpty()) {
-                context.getSharedPreferences("art-meta", Context.MODE_PRIVATE).edit().putString(id, meta).apply();
-            }
-            forget();
-            return id;
+            return saveFile(tmp, prompt, meta);
         } finally { if (tmp.exists()) tmp.delete(); }
+    }
+
+    private String saveFile(File tmp, String prompt, String meta) throws IOException {
+        File dir = new File(context.getFilesDir(), "images");
+        if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("无法创建作品目录。");
+        BitmapFactory.Options info = new BitmapFactory.Options();
+        info.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(tmp.getPath(), info);
+        String ext = extension(info);
+        if (ext == null) {
+            if (tmp.equals(checkpoint.file)) checkpoint.reset();
+            throw new IOException("结果不是支持的图片格式。");
+        }
+        String id = System.currentTimeMillis() + "-" + UUID.randomUUID() + "." + ext;
+        if (!tmp.renameTo(new File(dir, id))) throw new IOException("作品保存失败。");
+        context.getSharedPreferences("art", Context.MODE_PRIVATE).edit().putString(id, prompt).apply();
+        if (meta != null && !meta.isEmpty()) {
+            context.getSharedPreferences("art-meta", Context.MODE_PRIVATE).edit().putString(id, meta).apply();
+        }
+        forget();
+        return id;
     }
 
     static void copy(InputStream in, OutputStream out, int limit, String error) throws IOException {
