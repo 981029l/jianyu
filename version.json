@@ -1,6 +1,6 @@
 {
-  "versionCode": 19,
-  "versionName": "0.8.10",
-  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.10/Jianyu-v0.8.10.apk",
-  "releaseNotes": "1. 提示词工坊每次进入随机展示，本次分页与返回详情保持顺序。\n2. 生成记录的状态、长模型名、比例与耗时分组换行，修复标签挤成竖条的问题，优化窄屏和大字体布局。\n3. 后台绘图接入前台服务与任务通知，支持后台查询、保存和安全续取原任务。\n4. 应用更新优先加速通道，失败快速切换直连，增加下载总时限、完整性与包名/版本/签名校验。"
+  "versionCode": 20,
+  "versionName": "0.8.11",
+  "downloadUrl": "https://github.com/981029l/jianyu/releases/download/v0.8.11/Jianyu-v0.8.11.apk",
+  "releaseNotes": "1. Grok 开启 NSFW 后固定 2:3 竖图，关闭后恢复原比例，补充仅限成年角色的说明。\n2. 创建独立任务后自动清空输入区参考图，原任务保留图片地址供生成与恢复使用。\n3. 移除客户端和网关的 4000 字符限制，完整提交长提示词，显示服务端错误。"
 }

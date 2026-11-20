@@ -342,6 +342,7 @@ public final class MainActivity extends Activity {
 
     private int dp(float v) { return UiKit.dp(this, v); }
     private boolean isGrok() { return selectedRoute == 0 && modelLine1 == 1; }
+    private String activeRatioName() { return ImageService.generationRatio(activeWireModelName(), ratios[ratio], isGrok() && nsfw); }
 
     /** 专属极简 Apple 风格开屏启动动画（冷启动时 0.45 秒内平滑展开，无黑屏无广告） */
     private void playLaunchAnimation() {
@@ -769,7 +770,7 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams footLp = new LinearLayout.LayoutParams(-1, -2);
         footLp.topMargin = dp(10);
 
-        promptCounter = UiKit.text(this, draft.codePointCount(0, draft.length()) + " / 4000", 11.5f, UiKit.MUTED, false);
+        promptCounter = UiKit.text(this, draft.codePointCount(0, draft.length()) + " 字符", 11.5f, UiKit.MUTED, false);
         foot.addView(promptCounter, new LinearLayout.LayoutParams(0, -2, 1));
 
         promptClearBtn = UiKit.pillTagButton(this, R.drawable.ic_close, "清空", UiKit.SOFT, UiKit.MUTED, () -> {
@@ -804,7 +805,7 @@ public final class MainActivity extends Activity {
             @Override public void afterTextChanged(Editable s) {
                 String value = s.toString();
                 draft = value;
-                promptCounter.setText(value.codePointCount(0, value.length()) + " / 4000");
+                promptCounter.setText(value.codePointCount(0, value.length()) + " 字符");
                 promptClearBtn.setVisibility(value.isEmpty() ? View.GONE : View.VISIBLE);
             }
         });
@@ -899,7 +900,7 @@ public final class MainActivity extends Activity {
         // 更新参数胶囊文案
         if (paramSummaryText != null) {
             String routeName = selectedRoute == 0 ? "线路 1" : "线路 2";
-            String summary = routeName + " · " + activeModelDisplayName() + " · " + ratios[ratio];
+            String summary = routeName + " · " + activeModelDisplayName() + " · " + activeRatioName();
             if (isGrok() && nsfw) summary += " · NSFW";
             paramSummaryText.setText(summary);
         }
@@ -1164,18 +1165,22 @@ public final class MainActivity extends Activity {
 
                 LinearLayout ratioRow = new LinearLayout(MainActivity.this);
                 ratioRow.setOrientation(LinearLayout.HORIZONTAL);
-                for (int i = 0; i < ratios.length; i++) {
-                    final int idx = i;
-                    LinearLayout card = UiKit.ratioCard(MainActivity.this, ratios[i], idx == ratio, () -> {
-                        if (ratio != idx) {
-                            ratio = idx;
-                            refreshHomeDynamic();
-                            run();
-                        }
-                    });
-                    LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, -2, 1);
-                    if (i > 0) rlp.leftMargin = dp(7);
-                    ratioRow.addView(card, rlp);
+                if (isGrok() && nsfw) {
+                    ratioRow.addView(UiKit.text(MainActivity.this, "NSFW 模式固定输出 " + ImageService.GROK_NSFW_RATIO, 13, UiKit.INK, true));
+                } else {
+                    for (int i = 0; i < ratios.length; i++) {
+                        final int idx = i;
+                        LinearLayout card = UiKit.ratioCard(MainActivity.this, ratios[i], idx == ratio, () -> {
+                            if (ratio != idx) {
+                                ratio = idx;
+                                refreshHomeDynamic();
+                                run();
+                            }
+                        });
+                        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(0, -2, 1);
+                        if (i > 0) rlp.leftMargin = dp(7);
+                        ratioRow.addView(card, rlp);
+                    }
                 }
                 LinearLayout.LayoutParams rrlp = new LinearLayout.LayoutParams(-1, -2);
                 rrlp.topMargin = dp(8);
@@ -1198,7 +1203,7 @@ public final class MainActivity extends Activity {
                     LinearLayout texts = new LinearLayout(MainActivity.this);
                     texts.setOrientation(LinearLayout.VERTICAL);
                     texts.addView(UiKit.text(MainActivity.this, "允许 NSFW", 13.5f, UiKit.INK, true));
-                    texts.addView(UiKit.text(MainActivity.this, "仅线路 1 Grok 模型支持 · 默认关闭", 11, UiKit.MUTED, false));
+                    texts.addView(UiKit.text(MainActivity.this, getString(R.string.grok_nsfw_help, ImageService.GROK_NSFW_RATIO), 11, UiKit.MUTED, false));
                     LinearLayout.LayoutParams txlp = new LinearLayout.LayoutParams(0, -2, 1);
                     txlp.leftMargin = dp(10);
                     nsfwRow.addView(texts, txlp);
@@ -1208,6 +1213,7 @@ public final class MainActivity extends Activity {
                     toggle.setOnCheckedChangeListener((b, checked) -> {
                         nsfw = checked;
                         refreshHomeDynamic();
+                        run();
                     });
                     nsfwRow.addView(toggle);
                     nsfwRow.setOnClickListener(v -> toggle.toggle());
@@ -3359,18 +3365,19 @@ public final class MainActivity extends Activity {
         }
         if (promptInput != null) draft = promptInput.getText().toString();
         String input = draft.trim();
-        if (input.isEmpty() || input.codePointCount(0, input.length()) > 4000) {
+        if (input.isEmpty()) {
             if (promptInput != null) {
-                promptInput.setError("请输入 1 至 4000 个字符的画面描述");
+                promptInput.setError("请输入画面描述");
                 if (heroCardView != null) MotionKit.shake(heroCardView);
             }
             return;
         }
         GenerationRecord record = new GenerationRecord(UUID.randomUUID().toString(), System.currentTimeMillis(),
-                selectedRoute, routes[selectedRoute], activeModelDisplayName(), wireModel, ratios[ratio], input,
+                selectedRoute, routes[selectedRoute], activeModelDisplayName(), wireModel, activeRatioName(), input,
                 reference != null, reference != null ? reference.toString() : "", isGrok() && nsfw,
                 GenerationRecord.STATUS_RUNNING, "", "", 0L);
         if (!GenerationTasks.start(this, record, MainActivity::finished)) return;
+        reference = null;
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
                 != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);

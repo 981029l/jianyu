@@ -25,6 +25,8 @@ MAX_REQUEST = 6 * 1024 * 1024
 MAX_RESULT = 1024 * 1024
 MAX_DETAIL = 300
 MAX_TASK_KEYS = 2000
+GROK_NSFW_RATIO = '2:3'
+GROK_NSFW_SIZE = '1024x1536'
 
 
 def parse_keys(raw):
@@ -108,24 +110,26 @@ def generation(body):
     if not isinstance(body, dict):
         raise ValueError('请求必须为 JSON 对象。')
     prompt = body.get('prompt')
-    if not isinstance(prompt, str) or not 1 <= len(prompt.strip()) <= 4000:
-        raise ValueError('提示词长度须为 1 至 4000 个字符。')
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError('请输入画面描述。')
     model, ratio = body.get('model'), body.get('ratio')
     if not isinstance(model, str) or model not in MODELS:
         raise ValueError('模型或图片比例无效。')
     name, quality = MODELS[model]
     model_sizes = SIZES[name]
-    if not isinstance(ratio, str) or ratio not in model_sizes:
-        raise ValueError('模型或图片比例无效。')
-    payload = dict(prompt=prompt.strip(), model=name, size=model_sizes[ratio], quality=quality, n=1, response_format='url')
+    nsfw = False
     if 'nsfw' in body:
         nsfw = body['nsfw']
         if not isinstance(nsfw, bool):
             raise ValueError('nsfw 须为布尔值。')
         if nsfw and name != 'image-2':
             raise ValueError('仅 Grok 支持开启 NSFW。')
-        if name == 'image-2':
-            payload['nsfw'] = nsfw
+    if not isinstance(ratio, str) or (ratio not in model_sizes and not (nsfw and ratio == GROK_NSFW_RATIO)):
+        raise ValueError('模型或图片比例无效。')
+    size = GROK_NSFW_SIZE if nsfw else model_sizes[ratio]
+    payload = dict(prompt=prompt.strip(), model=name, size=size, quality=quality, n=1, response_format='url')
+    if name == 'image-2' and 'nsfw' in body:
+        payload['nsfw'] = nsfw
     if 'image' in body:
         image = body['image']
         if not isinstance(image, str) or not re.fullmatch(r'data:image/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+=*', image):

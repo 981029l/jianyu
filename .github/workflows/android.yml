@@ -31,6 +31,9 @@ jobs:
               out.write(f"version_name={meta['versionName']}\n")
           pathlib.Path('release-notes.txt').write_text(meta.get('releaseNotes', '').strip() + '\n', encoding='utf-8')
           PY
+      - name: Test generation gateway
+        working-directory: gateway
+        run: python3 -m unittest -v test_gateway
       - name: Test and assemble release APK
         env:
           JIANYU_IMAGE_ENDPOINT: ${{ vars.JIANYU_IMAGE_ENDPOINT }}

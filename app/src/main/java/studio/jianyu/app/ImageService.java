@@ -34,6 +34,8 @@ import javax.net.ssl.HttpsURLConnection;
 final class ImageService {
     static final int IMAGE_LIMIT = 24 * 1024 * 1024;
     static final String PENDING_PREFS = "pending-image";
+    static final String GROK_NSFW_RATIO = "2:3";
+    private static final String GROK_NSFW_SIZE = "1024x1536";
     private static final Object KEY_LOCK = new Object();
     private static final int REFERENCE_LIMIT = 4 * 1024 * 1024;
     private static final int JSON_LIMIT = 1024 * 1024;
@@ -378,10 +380,15 @@ final class ImageService {
         return wireModel == null ? "GPT-2.5" : wireModel;
     }
 
+    static String generationRatio(String model, String ratio, boolean nsfw) {
+        return nsfw && ("image-2".equals(model) || "Image 2".equals(model)) ? GROK_NSFW_RATIO : ratio;
+    }
+
     String run(String prompt, String model, String ratio, Uri reference, boolean nsfw) throws Exception {
         if (cancelled) throw new IOException("已取消本次等待。");
         if (isSubmissionUnconfirmed() && !hasPending())
             throw new IOException("上次提交结果尚未确认，请先核对服务端记录，避免重复生成。");
+        if (!hasPending()) ratio = generationRatio(model, ratio, nsfw);
         reportProgress(hasPending() ? GenerationRecord.STATUS_RUNNING : GenerationRecord.STATUS_SUBMITTING);
         if (!isDirectMode()) return runGateway(prompt, model, ratio, reference, nsfw);
         return runDirect(prompt, model, ratio, reference, nsfw);
@@ -883,6 +890,7 @@ final class ImageService {
     }
 
     private static String directSize(String upstreamModel, String ratio) {
+        if ("image-2".equals(upstreamModel) && GROK_NSFW_RATIO.equals(ratio)) return GROK_NSFW_SIZE;
         if ("image-1".equals(upstreamModel)) {
             if ("3:4".equals(ratio) || "9:16".equals(ratio)) return "1024x1536";
             if ("4:3".equals(ratio) || "16:9".equals(ratio)) return "1536x1024";

@@ -1,5 +1,6 @@
 <resources>
     <string name="app_name">见屿</string>
+    <string name="grok_nsfw_help">仅线路 1 Grok 支持 · 默认关闭\n开启后固定 %1$s，仅限 18 岁及以上成年角色，不支持未成年人相关提示词；内容是否通过由服务端判定。</string>
 
     <string-array name="routes">
         <item>线路 1</item>

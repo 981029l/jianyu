@@ -76,6 +76,37 @@ public class ImageServicePollingTest {
         assertFalse(service.isSubmissionUnconfirmed());
     }
 
+    @Test public void grokNsfwUsesFixedPortraitSizeAndForwardsLongPromptIntact() throws Exception {
+        String prompt = "海边灯塔🌊".repeat(1000);
+        HttpsURLConnection submit = response(422, "{\"detail\":\"upstream prompt too long\"}");
+        ByteArrayOutputStream sent = new ByteArrayOutputStream();
+        when(submit.getOutputStream()).thenReturn(sent);
+        doReturn(submit).when(service).connect(any(URL.class), anyInt());
+        IOException error = assertThrows(IOException.class, () -> service.run(prompt, "image-2", "16:9", null, true));
+        org.json.JSONObject body = new org.json.JSONObject(sent.toString("UTF-8"));
+        assertEquals(prompt, body.getString("prompt"));
+        assertEquals("1024x1536", body.getString("size"));
+        assertTrue(body.getBoolean("nsfw"));
+        assertTrue(error.getMessage().contains("upstream prompt too long"));
+        verify(service, times(1)).connect(any(URL.class), anyInt());
+    }
+
+    @Test public void gatewayNsfwUsesFixedRatioWithoutChangingOtherModels() throws Exception {
+        assertEquals("16:9", ImageService.generationRatio("image-2", "16:9", false));
+        assertEquals("16:9", ImageService.generationRatio("image-1", "16:9", true));
+        assertEquals("16:9", ImageService.generationRatio("gpt-image-2.5", "16:9", true));
+        doReturn(false).when(service).isDirectMode();
+        doReturn("https://example.test/generate").when(service).gatewayEndpoint();
+        HttpsURLConnection submit = response(400, "{\"error\":\"test rejection\"}");
+        ByteArrayOutputStream sent = new ByteArrayOutputStream();
+        when(submit.getOutputStream()).thenReturn(sent);
+        doReturn(submit).when(service).connect(any(URL.class), anyInt());
+        assertThrows(IOException.class, () -> service.run("成年角色艺术摄影", "image-2", "1:1", null, true));
+        org.json.JSONObject body = new org.json.JSONObject(sent.toString("UTF-8"));
+        assertEquals("2:3", body.getString("ratio"));
+        assertTrue(body.getBoolean("nsfw"));
+    }
+
     @Test public void lineOneReportsQueueGenerationAndDownloadAndRetainsUrl() throws Exception {
         HttpsURLConnection submit = response(202, "{\"task_id\":\"task-a\",\"status\":\"queued\"}");
         HttpsURLConnection running = response(200, "{\"status\":\"running\"}");

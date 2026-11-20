@@ -98,7 +98,7 @@ class Integration(unittest.TestCase):
         self.assertEqual(self.call('/generate?task_id=77')[0], 410)
 
     def test_invalid_input_never_reaches_provider(self):
-        for change in ({'prompt': ' '}, {'prompt': '海' * 4001}, {'ratio': '0:0'}, {'model': None},
+        for change in ({'prompt': ' '}, {'prompt': None}, {'ratio': '0:0'}, {'ratio': '2:3'}, {'model': None},
                        {'image': 'file:///bad'}, {'nsfw': 'true'}, {'nsfw': 1}, {'nsfw': True}):
             with self.subTest(field=next(iter(change)), value=next(iter(change.values()))):
                 self.assertEqual(self.call(body=dict(self.form, **change))[0], 400)
@@ -126,9 +126,32 @@ class Integration(unittest.TestCase):
             status, _ = self.call(body=dict(self.form, model='Image 2', nsfw=flag))
             self.assertEqual(status, 200)
             self.assertIs(self.provider.calls[-1][3]['nsfw'], flag)
+            self.assertEqual(self.provider.calls[-1][3]['size'], '1024x1536' if flag else '1024x1024')
         self.provider.answers.append((200, {'data': [{'url': self.image}]}))
         self.assertEqual(self.call(body=dict(self.form, model='Image 1', nsfw=False))[0], 200)
         self.assertNotIn('nsfw', self.provider.calls[-1][3])
+
+    def test_grok_nsfw_fixed_ratio_with_and_without_reference(self):
+        image = 'data:image/png;base64,' + base64.b64encode(b'png').decode()
+        for ratio in ('1:1', '2:3', '9:16'):
+            for reference in ({}, {'image': image}):
+                with self.subTest(ratio=ratio, reference=bool(reference)):
+                    self.provider.answers.append((200, {'data': [{'url': self.image}]}))
+                    status, _ = self.call(body=dict(self.form, model='Image 2', ratio=ratio, nsfw=True, **reference))
+                    self.assertEqual(status, 200)
+                    self.assertEqual(self.provider.calls[-1][3]['size'], '1024x1536')
+                    self.assertEqual(self.provider.calls[-1][1], '/api/v1/images/edits' if reference else '/api/v1/images/generations')
+
+    def test_long_unicode_prompt_is_forwarded_without_truncation(self):
+        prompt = '海边灯塔🌊' * 1000
+        self.provider.answers.extend([(200, {'data': [{'url': self.image}]}),
+                                     (422, {'detail': 'upstream prompt too long'})])
+        self.assertEqual(self.call(body=dict(self.form, prompt=prompt))[0], 200)
+        self.assertEqual(self.provider.calls[-1][3]['prompt'], prompt)
+        status, result = self.call(body=dict(self.form, prompt=prompt))
+        self.assertEqual(status, 422)
+        self.assertEqual(result['detail'], 'upstream prompt too long')
+        self.assertEqual(len(self.provider.calls), 2)
 
     def test_error_detail_passthrough(self):
         self.provider.answers.extend([
